@@ -82,54 +82,109 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
         derivs = Table[D[eqns[[i]], localCoords[[j]]], {j, Length[localCoords]}] /. substCoords;
         AppendTo[jacRows, derivs];
     ];
+
+    (* Find k coordinates to eliminate (one per equation) *)
+    (* We need to find k coordinates such that the k×k Jacobian submatrix is non-singular *)
+    maxPoss = {};  (* Local indices of dependent coordinates *)
+    maxPossGlobal = {};  (* Global indices of dependent coordinates *)
+    availableCoords = Range[Length[localCoords]];
+
+    For[i = 1, i <= numEqns, i++,
+        (* Find coordinate with largest derivative in equation i among available coords *)
+        bestPos = 0;
+        bestVal = 0;
+        For[j = 1, j <= Length[availableCoords], j++,
+            If[Abs[jacRows[[i, availableCoords[[j]]]]] > bestVal,
+                bestVal = Abs[jacRows[[i, availableCoords[[j]]]]];
+                bestPos = availableCoords[[j]];
+            ];
+        ];
+        AppendTo[maxPoss, bestPos];
+        AppendTo[maxPossGlobal, Position[varsFlat, localCoords[[bestPos]]][[1, 1]]];
+        availableCoords = DeleteCases[availableCoords, bestPos];
+    ];
     
-    (* Find coordinate with maximum derivative (for implicit function theorem) *)
-    (* Use first equation to determine the dependent coordinate *)
-    maxPos = getAbsMaxPos[jacRows[[1]]];
-    maxPosGlobal = Position[varsFlat, localCoords[[maxPos]]][[1, 1]];
+    (* Compute antiholomorphic Jacobian for all equations *)
+    bjacRows = {};
+    For[i = 1, i <= numEqns, i++,
+        bderivs = Table[D[beqns[[i]], localbCoords[[j]]], {j, Length[localbCoords]}] /. substbCoords;
+        AppendTo[bjacRows, bderivs];
+    ];
     
-    (* Compute antiholomorphic Jacobian *)
-    bderivs = Table[D[beqns[[1]], localbCoords[[j]]], {j, Length[localbCoords]}] /. substbCoords;
-    
-    (* Build Jacobian matrix for pullback *)
+    (* Build Jacobian submatrix for dependent coordinates *)
     (* dw[a,i] gives derivative of ambient coordinate a with respect to intrinsic coordinate i *)
+    jacSubmatrix = Table[jacRows[[i, maxPoss[[j]]]], {i, numEqns}, {j, numEqns}];
+    jacSubmatrixInv = Inverse[jacSubmatrix];
+
+    (* DEBUG: Check if Jacobian is singular *)
+    If[!And @@ (NumericQ /@ Flatten[jacSubmatrixInv]),
+        Return[{Indeterminate, Indeterminate}];
+    ];
+
     dw[a_, i_] := If[a == patchIndex, 0,
-        If[MemberQ[Flatten[Position[varsFlat, localCoords] /. {k_Integer} :> If[k > maxPos, k - 1, k]], i],
-            (* This is one of the independent coordinates *)
-            If[Position[varsFlat, localCoords[[If[i >= maxPos, i + 1, i]]]][[1, 1]] == a, 1, 0],
-            (* This is the dependent coordinate *)
-            If[a == maxPosGlobal,
-                -D[eqns[[1]], varsFlat[[a]]] / jacRows[[1, maxPos]] /. substCoords,
-                0
-            ]
+        If[MemberQ[maxPossGlobal, a],
+            (* This is a dependent coordinate *)
+            Module[{eqnIndex},
+                eqnIndex = Position[maxPossGlobal, a][[1, 1]];
+                (* Use implicit function theorem: dx_dep/dz_i = -J^(-1) * dp/dz_i *)
+                -Sum[jacSubmatrixInv[[eqnIndex, k]] * D[eqns[[k]], varsFlat[[i]]], {k, numEqns}] /. substCoords
+            ],
+            (* This is an independent coordinate *)
+            If[a == i, 1, 0]
         ]
     ];
     
+    (* Build antiholomorphic Jacobian submatrix *)
+    bjacSubmatrix = Table[bjacRows[[i, maxPoss[[j]]]], {i, numEqns}, {j, numEqns}];
+    bjacSubmatrixInv = Inverse[bjacSubmatrix];
+
+    (* DEBUG: Check if antiholomorphic Jacobian is singular *)
+    If[!And @@ (NumericQ /@ Flatten[bjacSubmatrixInv]),
+        Return[{Indeterminate, Indeterminate}];
+    ];
+
     dbw[a_, i_] := If[a == patchIndex, 0,
-        If[MemberQ[Flatten[Position[bvarsFlat, localbCoords] /. {k_Integer} :> If[k > maxPos, k - 1, k]], i],
-            If[Position[bvarsFlat, localbCoords[[If[i >= maxPos, i + 1, i]]]][[1, 1]] == a, 1, 0],
-            If[a == maxPosGlobal,
-                -D[beqns[[1]], bvarsFlat[[a]]] / bderivs[[maxPos]] /. substbCoords,
-                0
-            ]
+        If[MemberQ[maxPossGlobal, a],
+            (* This is a dependent coordinate *)
+            Module[{eqnIndex},
+                eqnIndex = Position[maxPossGlobal, a][[1, 1]];
+                -Sum[bjacSubmatrixInv[[eqnIndex, k]] * D[beqns[[k]], bvarsFlat[[i]]], {k, numEqns}] /. substbCoords
+            ],
+            (* This is an independent coordinate *)
+            If[a == i, 1, 0]
         ]
     ];
     
-    (* Indices of independent coordinates *)
-    goodCoordsIndexSet = DeleteCases[DeleteCases[Table[i, {i, Length[\[Omega]]}], maxPosGlobal], patchIndex];
+    (* Indices of independent coordinates - remove all dependent coords and patch coord *)
+    goodCoordsIndexSet = Table[i, {i, Length[varsFlat]}];
+    For[i = 1, i <= Length[maxPossGlobal], i++,
+        goodCoordsIndexSet = DeleteCases[goodCoordsIndexSet, maxPossGlobal[[i]]];
+    ];
+    goodCoordsIndexSet = DeleteCases[goodCoordsIndexSet, patchIndex];
+
+    (* DEBUG: Check global ambient indices *)
+    Print["goodCoordsIndexSet: ", goodCoordsIndexSet];
+    Print["maxPossGlobal: ", maxPossGlobal];
+    Print["patchIndex: ", patchIndex];
+    Print["Length[ω]: ", Length[ω]];
     
     (* Pull back metric to intrinsic coordinates *)
     \[Omega]PB = Table[
         Sum[dw[a, i] \[Omega][[a, b]] dbw[b, j], 
-            {a, Length[\[Omega]]}, {b, Length[\[Omega]]}],
+            {a, Length[varsFlat]}, {b, Length[varsFlat]}],
         {i, goodCoordsIndexSet}, {j, goodCoordsIndexSet}
+    ];
+
+    (* DEBUG: Check pullback metric *)
+    If[!And @@ (NumericQ /@ Flatten[\[Omega]PB]),
+        Return[{Indeterminate, Indeterminate}];
     ];
     
     (* Top form *)
     \[Omega]Top = Factorial[Length[\[Omega]PB]] Det[\[Omega]PB];
     
-    (* Omega wedge Omega-bar factor *)
-    OmegaOmegaBar = 1/(jacRows[[1, maxPos]] bderivs[[maxPos]]);
+    (* Omega wedge Omega-bar factor - determinant of Jacobian submatrices *)
+    OmegaOmegaBar = 1/(Det[jacSubmatrix] * Det[bjacSubmatrix]);
     
     (* Weight *)
     w = OmegaOmegaBar / \[Omega]Top;
@@ -156,8 +211,7 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
             
             (* Calculate weights for all metrics *)
             allMetricWeights = Table[
-                g = getFS[varsUnflat, bvarsUnflat, 
-                    Table[ConjugateTranspose[Ls[[j, k]]] . Ls[[j, k]], {k, Length[Ls[[j]]]}]];
+                g = getFS[varsUnflat, bvarsUnflat, Table[ConjugateTranspose[Ls[[j]][[k]]] . Ls[[j]][[k]], {k, Length[Ls[[j]]]}]];
                 First[getWeightOmegas[varsFlat, bvarsFlat, varsUnflat, dimPs, 
                     g, eqns, beqns, pt, Conjugate[pt], patchIndex, \[Kappa]s[[1]]]],
                 {j, Length[Ls]}
@@ -235,12 +289,11 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
     (* Apply metric transformation to sphere points *)
     transformedSphere = Table[
         Table[
-            Sum[L[[j, k, b]] pointsOnSphere[[j, k, a]], {b, Length[L[[j]]]}],
+            Sum[L[[j]][[k, b]] pointsOnSphere[[j, k, a]], {b, Length[L[[j]]]}],
             {k, Length[pointsOnSphere[[j]]]}, {a, Length[pointsOnSphere[[j, 1]]]}
         ],
         {j, Length[pointsOnSphere]}
     ];
-    
     subst = {};
     pts = {};
     For[j = 1, j <= Length[dimPs], j++,
@@ -372,7 +425,7 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
     pts = Flatten[pts, 1];
     
     (* Compute metric *)
-    g = getFS[varsUnflat, bvarsUnflat, L];
+    g = getFS[varsUnflat, bvarsUnflat, Table[ConjugateTranspose[L[[k]]] . L[[k]], {k, Length[L]}]];
     
     (* Compute weights *)
     allPts = ParallelTable[
@@ -458,7 +511,7 @@ GeneratePointsMCICYIPS[TotalNumPts_, NumRegions_, dimPs_, coefficients_, exponen
     PrintMsg["Calculated \[Kappa]=" <> ToString[\[Kappa]], frontEnd, verbose];
     
     (* Iteratively generate new regions *)
-    For[r = 1, r <= Floor[(NumRegions - 1)/2], r++,
+    For[r = 1, r <= Floor[NumRegions/2], r++,
         Ls = Join[Ls, GetNewLambdas[varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
             dimPs, eqns, beqns, allPts, Ls, \[Kappa]s, dimCY]];
         
