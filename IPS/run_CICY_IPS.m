@@ -14,10 +14,13 @@ dimPs = {2};
 coefficients = {{1.0, -4.0, 189.07272}};
 exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}};
 
+(* Number of regions *)
+numRegions = 11;
+
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    10^2,      (* total points *)
-    11,         (* regions *)
+    20000,      (* total points *)
+    numRegions,         (* regions *)
     dimPs,
     coefficients,
     exponents,
@@ -81,19 +84,28 @@ If[Length[validIndices] == 0,
   Print["Point shape: ", Dimensions[pointCoordsNumeric]];
   Print["First point: ", pointCoordsNumeric[[1]]];
   Print["First weight: ", weightsNumeric[[1]]];
+
   (*Export*)
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/points_real.csv", 
-   Re[pointCoordsNumeric]];
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/points_imag.csv", 
-   Im[pointCoordsNumeric]];
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/weights.csv", 
-   weightsNumeric];
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/omegas.csv", 
-   omegasNumeric];
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/kappas.csv", 
-   kappasNumeric];
+  dir  = "/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output";
+
+  ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, ptsRealFile}], Re[pointCoordsNumeric]];
+
+  ptsImgFile = StringTemplate["points_imag_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, ptsImgFile}], Im[pointCoordsNumeric]];
+
+  weightsFile = StringTemplate["weights_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, weightsFile}], weightsNumeric];
+
+  omegasFile = StringTemplate["omegas_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, omegasFile}], omegasNumeric];
+
+  kappasFile = StringTemplate["kappas_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, kappasFile}], kappasNumeric];
+
   (*Export metadata*)
-  Export["/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/metadata.json", {"dim_cy" ->
+  metafile = StringTemplate["metadata_``.json"][numRegions];
+  Export[FileNameJoin[{dir, metafile}], {"dim_cy" ->
       dimCYData, "num_points" -> Length[pointCoordsNumeric], 
     "num_regions" -> Length[kappasNumeric], 
     "point_dimension" -> Length[pointCoordsNumeric[[1]]]}, "JSON"];

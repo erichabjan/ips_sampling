@@ -335,34 +335,63 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
 (* Sample points on CICY with given metric *)
 getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_, 
     eqns_, L_, precision_: 20] := Module[
-    {subst, pts, i, j, a, b, res, maxPoss, absPts, transformedSphere},
+    {subst, pts, i, j, a, b, c, res, maxPoss, absPts, transformedParams, 
+     LInvTranspose, transformedSphere},
     (
     Print["getPointsOnCYIPS: L structure: ", Dimensions /@ L];
     Print["getPointsOnCYIPS: pointsOnSphere structure: ", Dimensions /@ pointsOnSphere];
     Print["getPointsOnCYIPS: First L matrix: ", L[[1]]];
-    (* Apply metric transformation to sphere points *)
+    
+    (* KEY CHANGE: Apply L^{-T} to the sphere points to transform the MEASURE *)
+    (* If L = Cholesky(λ^{-1}), then the transformed inner product is *)
+    (* <v, w>_new = <L^T v, L^T w>_standard *)
+    (* To generate random vectors with respect to this new inner product, *)
+    (* we need to apply L^{-T} to standard normal random vectors *)
+    
+    (* For each projective space, compute L^{-T} and apply to sphere points *)
     transformedSphere = Table[
-        Table[
-            Sum[L[[j]][[k, b]] pointsOnSphere[[j, k, a]], {b, Length[L[[j]]]}],
-            {k, Length[pointsOnSphere[[j]]]}, {a, Length[pointsOnSphere[[j, 1]]]}
+        Module[{LInv, LInvTrans},
+            LInv = Inverse[L[[j]]];
+            LInvTrans = Transpose[LInv];
+            (* Apply L^{-T} to each sphere point *)
+            Table[
+                (* Normalize after transformation *)
+                Module[{transformed},
+                    transformed = Table[
+                        Sum[LInvTrans[[a, c]] pointsOnSphere[[j, b, c]], 
+                            {c, 1, Length[pointsOnSphere[[j, 1]]]}],
+                        {a, 1, Length[pointsOnSphere[[j, 1]]]}
+                    ];
+                    (* Renormalize to unit sphere *)
+                    transformed / Sqrt[Conjugate[transformed] . transformed]
+                ],
+                {b, 1, Length[pointsOnSphere[[j]]]}
+            ]
         ],
-        {j, Length[pointsOnSphere]}
+        {j, 1, Length[pointsOnSphere]}
     ];
-    Print["getPointsOnCYIPS: Sample transformed point: ", transformedSphere[[1, 1]]];
-    Print["getPointsOnCYIPS: Sample original point: ", pointsOnSphere[[1, 1]]];
-    Print["getPointsOnCYIPS: Are they different? ", transformedSphere[[1, 1]] != pointsOnSphere[[1, 1]]];
+    
+    Print["getPointsOnCYIPS: Sample transformed sphere: ", transformedSphere[[1, 1]]];
+    Print["getPointsOnCYIPS: Sample original sphere: ", pointsOnSphere[[1, 1]]];
+    Print["getPointsOnCYIPS: Norm of transformed: ", 
+        Sqrt[Conjugate[transformedSphere[[1, 1]]] . transformedSphere[[1, 1]]]];
+    Print["getPointsOnCYIPS: Are they different? ", 
+        transformedSphere[[1, 1]] != pointsOnSphere[[1, 1]]];
+    
+    (* Now build substitution using transformed sphere points *)
     subst = {};
-    pts = {};
     For[j = 1, j <= Length[dimPs], j++,
         AppendTo[subst, 
             Table[varsUnflat[[j, a]] -> 
-                Sum[params[[j, b]] transformedSphere[[j, b, a]], {b, Length[params[[j]]]}],
+                Sum[params[[j, b]] transformedSphere[[j, b, a]], 
+                    {b, Length[params[[j]]]}],
                 {a, Length[varsUnflat[[j]]]}
             ]
         ];
     ];
     subst = Flatten[subst];
     
+    (* Solve for parameters that put us on the CICY *)
     res = FindInstance[
         Table[eqns[[i]] == 0, {i, Length[eqns]}] /. subst,
         Variables[Flatten[params]],
@@ -371,6 +400,7 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
         WorkingPrecision -> precision
     ];
     
+    (* Extract points using the transformed parametrization *)
     pts = Chop[(varsUnflat /. subst) /. res];
     
     (* Go to patch where largest coordinate is 1 *)
