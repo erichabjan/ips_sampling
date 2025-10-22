@@ -16,8 +16,8 @@ exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}};
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    1000,      (* total points *)
-    5,         (* regions *)
+    10^2,      (* total points *)
+    11,         (* regions *)
     dimPs,
     coefficients,
     exponents,

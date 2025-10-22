@@ -23,7 +23,7 @@ PrintMsg[msg_, frontEnd_, verbose_] := Module[{}, (
 
 (* Compute Fubini-Study metric with optional Hermitian matrix h *)
 getFS[varsUnflat_, bvarsUnflat_, h_: {}, kval_: 1] := Module[{hh, s, bs, kk, dimPs, result, i, j, a, b}, (
-    dimPs = Length /@ varsUnflat;
+    dimPs = (Length /@ varsUnflat) - 1;
     hh = h;
     kk = kval;
     
@@ -113,7 +113,7 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     
     (* Build Jacobian submatrix for dependent coordinates *)
     (* dw[a,i] gives derivative of ambient coordinate a with respect to intrinsic coordinate i *)
-    jacSubmatrix = Table[jacRows[[i, maxPoss[[j]]]], {i, numEqns}, {j, numEqns}];
+    jacSubmatrix = Table[jacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
     jacSubmatrixInv = Inverse[jacSubmatrix];
 
     (* DEBUG: Check if Jacobian is singular *)
@@ -121,13 +121,30 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
         Return[{Indeterminate, Indeterminate}];
     ];
 
-    dw[a_, i_] := If[a == patchIndex, 0,
+    dw[a_, i_] := If[a == patchIndex, 
+        0,
         If[MemberQ[maxPossGlobal, a],
-            (* This is a dependent coordinate *)
-            Module[{eqnIndex},
-                eqnIndex = Position[maxPossGlobal, a][[1, 1]];
-                (* Use implicit function theorem: dx_dep/dz_i = -J^(-1) * dp/dz_i *)
-                -Sum[jacSubmatrixInv[[eqnIndex, k]] * D[eqns[[k]], varsFlat[[i]]], {k, numEqns}] /. substCoords
+            (* This is a dependent coordinate: z^a = z^{dep_alpha} *)
+            Module[{alphaIndex, localIndexI},
+                (* Find which dependent coordinate this is (1 to k) *)
+                alphaIndex = Position[maxPossGlobal, a][[1, 1]];
+            
+                (* Check if i is also a dependent coordinate or independent *)
+                If[MemberQ[maxPossGlobal, i],
+                    (* i is dependent - need more complex formula *)
+                    (* For dependent coords, ∂z^{dep_alpha}/∂z^{dep_beta} involves Jacobian *)
+                    Module[{betaIndex},
+                        betaIndex = Position[maxPossGlobal, i][[1, 1]];
+                        (* This should rarely be called for standard intrinsic coordinates *)
+                        (* but we include it for completeness *)
+                        If[alphaIndex == betaIndex, 
+                            1, 
+                            0
+                        ]
+                    ],
+                    (* i is independent - apply IFT: ∂z^{dep_alpha}/∂z^i = -[J^{-1}]_{alpha,gamma} ∂p_gamma/∂z^i *)
+                    -Sum[jacSubmatrixInv[[alphaIndex, gamma]] * D[eqns[[gamma]], varsFlat[[i]]], {gamma, numEqns}] /. substCoords
+                ]
             ],
             (* This is an independent coordinate *)
             If[a == i, 1, 0]
@@ -135,7 +152,7 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     ];
     
     (* Build antiholomorphic Jacobian submatrix *)
-    bjacSubmatrix = Table[bjacRows[[i, maxPoss[[j]]]], {i, numEqns}, {j, numEqns}];
+    bjacSubmatrix = Table[bjacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
     bjacSubmatrixInv = Inverse[bjacSubmatrix];
 
     (* DEBUG: Check if antiholomorphic Jacobian is singular *)
@@ -143,12 +160,26 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
         Return[{Indeterminate, Indeterminate}];
     ];
 
-    dbw[a_, i_] := If[a == patchIndex, 0,
+    (* dbw[a,i] gives ∂\bar{z}^a/∂\bar{w}^i *)
+    dbw[a_, i_] := If[a == patchIndex, 
+        0,
         If[MemberQ[maxPossGlobal, a],
             (* This is a dependent coordinate *)
-            Module[{eqnIndex},
-                eqnIndex = Position[maxPossGlobal, a][[1, 1]];
-                -Sum[bjacSubmatrixInv[[eqnIndex, k]] * D[beqns[[k]], bvarsFlat[[i]]], {k, numEqns}] /. substbCoords
+            Module[{alphaIndex},
+                alphaIndex = Position[maxPossGlobal, a][[1, 1]];
+            
+                If[MemberQ[maxPossGlobal, i],
+                    (* i is dependent *)
+                    Module[{betaIndex},
+                        betaIndex = Position[maxPossGlobal, i][[1, 1]];
+                        If[alphaIndex == betaIndex, 
+                            1, 
+                            0
+                        ]
+                    ],
+                    (* i is independent - apply IFT *)
+                    -Sum[bjacSubmatrixInv[[alphaIndex, gamma]] * D[beqns[[gamma]], bvarsFlat[[i]]], {gamma, numEqns}] /. substbCoords
+                ]
             ],
             (* This is an independent coordinate *)
             If[a == i, 1, 0]
@@ -161,12 +192,6 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
         goodCoordsIndexSet = DeleteCases[goodCoordsIndexSet, maxPossGlobal[[i]]];
     ];
     goodCoordsIndexSet = DeleteCases[goodCoordsIndexSet, patchIndex];
-
-    (* DEBUG: Check global ambient indices *)
-    Print["goodCoordsIndexSet: ", goodCoordsIndexSet];
-    Print["maxPossGlobal: ", maxPossGlobal];
-    Print["patchIndex: ", patchIndex];
-    Print["Length[ω]: ", Length[ω]];
     
     (* Pull back metric to intrinsic coordinates *)
     \[Omega]PB = Table[
@@ -198,6 +223,12 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
     {gFS, allWeights, minData, maxData, minPoint, maxPoint, wMin, wMax, 
     \[Epsilon]Min, \[Epsilon]Max, Px, \[Lambda]Min, \[Lambda]Max, \[Lambda]MinInv, \[Lambda]MaxInv, i},
     (
+
+    Print["GetNewLambdas: Starting with ", Length[pts], " points"];
+    Print["GetNewLambdas: Current number of metrics: ", Length[Ls]];
+    Print["GetNewLambdas: dimPs = ", dimPs];
+    Print["GetNewLambdas: dimCY = ", dimCY];
+
     (* Precompute standard FS metric once *)
     gFS = getFS[varsUnflat, bvarsUnflat];
     
@@ -222,6 +253,10 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
         {i, Length[pts]},
         DistributedContexts -> Automatic
     ];
+
+    Print["GetNewLambdas: Computed weights for all points"];
+    Print["GetNewLambdas: Number of valid weights: ", Count[allWeights, {_?NumericQ, _?NumericQ, __}]];
+    Print["GetNewLambdas: Sample of weights (first 3): ", Take[allWeights, Min[3, Length[allWeights]]]];
     
     (* Find global minimum and maximum *)
     minData = SortBy[allWeights, #[[1]] &][[1]];
@@ -234,6 +269,11 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
     wMax = maxData[[2]];
     maxPoint = maxData[[3]];
     \[Epsilon]Max = maxData[[4]];
+
+    Print["GetNewLambdas: wMin = ", wMin, ", wMax = ", wMax];
+    Print["GetNewLambdas: εMin = ", εMin, ", εMax = ", εMax];
+    Print["GetNewLambdas: minPoint = ", minPoint];
+    Print["GetNewLambdas: maxPoint = ", maxPoint];
     
     (* Construct Lambda matrices for each projective space *)
     \[Lambda]Min = Table[
@@ -257,6 +297,11 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
         ],
         {i, Length[dimPs]}
     ];
+
+    Print["GetNewLambdas: λMin matrices dimensions: ", Dimensions /@ λMin];
+    Print["GetNewLambdas: λMax matrices dimensions: ", Dimensions /@ λMax];
+    Print["GetNewLambdas: λMin[[1]] = ", λMin[[1]]];
+    Print["GetNewLambdas: λMax[[1]] = ", λMax[[1]]];
     
     (* Hermitianize the inverse matrices *)
     \[Lambda]MinInv = Table[
@@ -274,6 +319,12 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
         ],
         {i, Length[\[Lambda]Max]}
     ];
+
+    Print["GetNewLambdas: λMinInv dimensions: ", Dimensions /@ λMinInv];
+    Print["GetNewLambdas: λMaxInv dimensions: ", Dimensions /@ λMaxInv];
+    Print["GetNewLambdas: Checking if Cholesky will work..."];
+    Print["GetNewLambdas: λMinInv[[1]] numeric? ", And @@ (NumericQ /@ Flatten[λMinInv[[1]]])];
+    Print["GetNewLambdas: λMaxInv[[1]] numeric? ", And @@ (NumericQ /@ Flatten[λMaxInv[[1]]])];
     
     Return[{
         Table[CholeskyDecomposition[\[Lambda]MinInv[[i]]], {i, Length[\[Lambda]MinInv]}],
@@ -286,6 +337,9 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
     eqns_, L_, precision_: 20] := Module[
     {subst, pts, i, j, a, b, res, maxPoss, absPts, transformedSphere},
     (
+    Print["getPointsOnCYIPS: L structure: ", Dimensions /@ L];
+    Print["getPointsOnCYIPS: pointsOnSphere structure: ", Dimensions /@ pointsOnSphere];
+    Print["getPointsOnCYIPS: First L matrix: ", L[[1]]];
     (* Apply metric transformation to sphere points *)
     transformedSphere = Table[
         Table[
@@ -294,6 +348,9 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
         ],
         {j, Length[pointsOnSphere]}
     ];
+    Print["getPointsOnCYIPS: Sample transformed point: ", transformedSphere[[1, 1]]];
+    Print["getPointsOnCYIPS: Sample original point: ", pointsOnSphere[[1, 1]]];
+    Print["getPointsOnCYIPS: Are they different? ", transformedSphere[[1, 1]] != pointsOnSphere[[1, 1]]];
     subst = {};
     pts = {};
     For[j = 1, j <= Length[dimPs], j++,
@@ -411,7 +468,8 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         {i, Length[dimPs]},
         DistributedContexts -> Automatic
     ];
-    
+
+    Print["SamplePointsIPS: About to sample ", numPoints, " intersections with L having dimensions: ", Dimensions /@ L];
     (* Sample points with metric transformation *)
     pts = ParallelTable[
         getPointsOnCYIPS[varsUnflat, numParamsInPn, dimPs, params,
@@ -423,6 +481,7 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
     ];
     
     pts = Flatten[pts, 1];
+    Print["SamplePointsIPS: Found ", Length[pts], " raw points"];
     
     (* Compute metric *)
     g = getFS[varsUnflat, bvarsUnflat, Table[ConjugateTranspose[L[[k]]] . L[[k]], {k, Length[L]}]];
@@ -439,6 +498,8 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         {i, Length[pts]},
         DistributedContexts -> Automatic
     ];
+    Print["SamplePointsIPS: Computed weights for ", Length[allPts], " points"];
+    Print["SamplePointsIPS: Number with valid weights: ", Count[allPts[[;;, 2]], _?NumericQ]];
     
     (* Estimate kappa if not provided *)
     \[Kappa] = \[Kappa]In;
@@ -446,6 +507,19 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         \[Kappa] = 1/Mean[allPts[[;;, 2]]];
         allPts[[;;, 2]] = allPts[[;;, 2]] * \[Kappa];
     ];
+
+    (* NEW DEBUG PRINTS HERE *)
+    Print["SamplePointsIPS: First 3 points and their weights:"];
+    Print["  Point 1: ", allPts[[1, 1]], " -> weight: ", allPts[[1, 2]]];
+    If[Length[allPts] >= 2,
+        Print["  Point 2: ", allPts[[2, 1]], " -> weight: ", allPts[[2, 2]]];
+    ];
+    If[Length[allPts] >= 3,
+        Print["  Point 3: ", allPts[[3, 1]], " -> weight: ", allPts[[3, 2]]];
+    ];
+    Print["SamplePointsIPS: Weight statistics - Min: ", Min[allPts[[;;, 2]]], 
+          ", Max: ", Max[allPts[[;;, 2]]], ", Mean: ", Mean[allPts[[;;, 2]]]];
+    Print["SamplePointsIPS: L matrix being used: ", L[[1, 1;;2, 1;;2]]];
     
     Return[{allPts, \[Kappa]}];
 )];
@@ -472,7 +546,7 @@ GeneratePointsMCICYIPS[TotalNumPts_, NumRegions_, dimPs_, coefficients_, exponen
     bvarsFlat = Flatten[bvarsUnflat];
     
     (* Calculate CICY dimension *)
-    dimCY = Plus @@ (dimPs + 1) - Length[coefficients];
+    dimCY = Plus @@ dimPs - Length[coefficients];
     
     (* Reconstruct equations *)
     eqns = Table[
