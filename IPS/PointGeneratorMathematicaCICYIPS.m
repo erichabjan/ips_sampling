@@ -62,6 +62,20 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     maxPos, maxPosGlobal, goodCoordsIndexSet, \[Omega]Top, OmegaOmegaBar, 
     substCoords, substbCoords, jacRows, i, j, a, b, numEqns, dimCY},
     (
+    
+    (* DEBUG: Verify inputs *)
+    If[Length[eqns] != Length[beqns],
+        Print["ERROR: eqns and beqns have different lengths!"];
+        Print["  Length[eqns] = ", Length[eqns]];
+        Print["  Length[beqns] = ", Length[beqns]];
+        Return[{Indeterminate, Indeterminate}];
+    ];
+
+    If[!And @@ (NumericQ /@ Flatten[pt]),
+        Print["ERROR: Point has non-numeric values!"];
+        Return[{Indeterminate, Indeterminate}];
+    ];
+
     numEqns = Length[eqns];
     dimCY = Length[varsFlat] - numEqns;
     
@@ -85,41 +99,102 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
 
     (* Find k coordinates to eliminate (one per equation) *)
     (* We need to find k coordinates such that the k×k Jacobian submatrix is non-singular *)
+    (* Find k coordinates to eliminate (one per equation) *)
+    (* We need to find k coordinates such that the k×k Jacobian submatrix is non-singular *)
     maxPoss = {};  (* Local indices of dependent coordinates *)
     maxPossGlobal = {};  (* Global indices of dependent coordinates *)
-    availableCoords = Range[Length[localCoords]];
 
-    For[i = 1, i <= numEqns, i++,
-        (* Find coordinate with largest derivative in equation i among available coords *)
-        bestPos = 0;
-        bestVal = 0;
-        For[j = 1, j <= Length[availableCoords], j++,
-            If[Abs[jacRows[[i, availableCoords[[j]]]]] > bestVal,
-                bestVal = Abs[jacRows[[i, availableCoords[[j]]]]];
-                bestPos = availableCoords[[j]];
+    (* Try to find a good k×k submatrix with large determinant *)
+    Module[{bestCoords = {}, bestDet = 0, coordCombinations, jacSubmatrix, detVal},
+    
+        (* For small numEqns, we can try all combinations *)
+        (* For numEqns=2, this is C(n,2) combinations *)
+        If[numEqns <= 3 && Length[localCoords] <= 20,
+            (* Exhaustive search for small cases *)
+            coordCombinations = Subsets[Range[Length[localCoords]], {numEqns}];
+        
+            Do[
+                jacSubmatrix = Table[jacRows[[alpha, coords[[beta]]]], 
+                    {alpha, numEqns}, {beta, numEqns}];
+                detVal = Abs[Det[jacSubmatrix]];
+            
+                If[detVal > bestDet,
+                    bestDet = detVal;
+                    bestCoords = coords;
+                ];
+            , {coords, coordCombinations}];
+        
+            If[bestDet < 10^(-10),
+                (* No good coordinate selection found *)
+                Return[{Indeterminate, Indeterminate}];
+            ];
+        
+            maxPoss = bestCoords;
+            maxPossGlobal = Table[Position[varsFlat, localCoords[[maxPoss[[i]]]]][[1, 1]], 
+                {i, Length[maxPoss]}];
+        ,
+            (* For larger cases, use improved greedy with backtracking *)
+            Module[{availableCoords, candidateCoords, jacTest, detTest, added},
+                availableCoords = Range[Length[localCoords]];
+                candidateCoords = {};
+            
+                For[i = 1, i <= numEqns, i++,
+                    added = False;
+                
+                    (* Sort available coordinates by derivative magnitude for equation i *)
+                    Module[{sortedCoords},
+                        sortedCoords = Sort[availableCoords, 
+                            Abs[jacRows[[i, #1]]] > Abs[jacRows[[i, #2]]] &];
+                    
+                        (* Try coordinates in order until we find one that gives non-singular submatrix *)
+                        Do[
+                            Module[{testCoords},
+                                testCoords = Append[candidateCoords, coord];
+                            
+                                If[Length[testCoords] == 1,
+                                    (* First coordinate, just check its non-zero *)
+                                    If[Abs[jacRows[[i, coord]]] > 10^(-10),
+                                        AppendTo[candidateCoords, coord];
+                                        availableCoords = DeleteCases[availableCoords, coord];
+                                        added = True;
+                                        Break[];
+                                    ];
+                                ,
+                                    (* Check if submatrix with this coordinate is non-singular *)
+                                    jacTest = Table[jacRows[[alpha, testCoords[[beta]]]], 
+                                        {alpha, Length[testCoords]}, {beta, Length[testCoords]}];
+                                    detTest = Abs[Det[jacTest]];
+                                
+                                    If[detTest > 10^(-10),
+                                        AppendTo[candidateCoords, coord];
+                                        availableCoords = DeleteCases[availableCoords, coord];
+                                        added = True;
+                                        Break[];
+                                    ];
+                                ];
+                            ];
+                        , {coord, sortedCoords}];
+                    ];
+                
+                    If[!added,
+                        (* Could not find suitable coordinate *)
+                        Return[{Indeterminate, Indeterminate}];
+                    ];
+                ];
+            
+                maxPoss = candidateCoords;
+                maxPossGlobal = Table[Position[varsFlat, localCoords[[maxPoss[[i]]]]][[1, 1]], 
+                    {i, Length[maxPoss]}];
             ];
         ];
-        AppendTo[maxPoss, bestPos];
-        AppendTo[maxPossGlobal, Position[varsFlat, localCoords[[bestPos]]][[1, 1]]];
-        availableCoords = DeleteCases[availableCoords, bestPos];
     ];
-    
-    (* Compute antiholomorphic Jacobian for all equations *)
-    bjacRows = {};
-    For[i = 1, i <= numEqns, i++,
-        bderivs = Table[D[beqns[[i]], localbCoords[[j]]], {j, Length[localbCoords]}] /. substbCoords;
-        AppendTo[bjacRows, bderivs];
-    ];
-    
-    (* Build Jacobian submatrix for dependent coordinates *)
-    (* dw[a,i] gives derivative of ambient coordinate a with respect to intrinsic coordinate i *)
-    jacSubmatrix = Table[jacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
-    jacSubmatrixInv = Inverse[jacSubmatrix];
 
-    (* DEBUG: Check if Jacobian is singular *)
-    If[!And @@ (NumericQ /@ Flatten[jacSubmatrixInv]),
+    (* Verify final Jacobian submatrix is non-singular *)
+    jacSubmatrix = Table[jacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
+    If[Abs[Det[jacSubmatrix]] < 10^(-10),
         Return[{Indeterminate, Indeterminate}];
     ];
+    jacSubmatrixInv = Inverse[jacSubmatrix];
 
     dw[a_, i_] := If[a == patchIndex, 
         0,
@@ -154,6 +229,20 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     (* Build antiholomorphic Jacobian submatrix *)
     bjacSubmatrix = Table[bjacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
     bjacSubmatrixInv = Inverse[bjacSubmatrix];
+
+    If[Length[bjacRows] != numEqns || Length[bjacRows[[1]]] != Length[localCoords],
+        Print["ERROR in bjacRows construction!"];
+        Print["  Expected dimensions: ", {numEqns, Length[localCoords]}];
+        Print["  Actual dimensions: ", Dimensions[bjacRows]];
+        Return[{Indeterminate, Indeterminate}];
+    ];
+
+    If[Abs[Det[jacSubmatrix]] < 10^(-10) || Abs[Det[bjacSubmatrix]] < 10^(-10),
+        Print["ERROR: Selected Jacobians are singular!"];
+        Print["  |det(J)| = ", Abs[Det[jacSubmatrix]]];
+        Print["  |det(J̄)| = ", Abs[Det[bjacSubmatrix]]];
+        Return[{Indeterminate, Indeterminate}];
+    ];
 
     (* DEBUG: Check if antiholomorphic Jacobian is singular *)
     If[!And @@ (NumericQ /@ Flatten[bjacSubmatrixInv]),
@@ -198,11 +287,6 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
         Sum[dw[a, i] \[Omega][[a, b]] dbw[b, j], 
             {a, Length[varsFlat]}, {b, Length[varsFlat]}],
         {i, goodCoordsIndexSet}, {j, goodCoordsIndexSet}
-    ];
-
-    (* DEBUG: Check pullback metric *)
-    If[!And @@ (NumericQ /@ Flatten[\[Omega]PB]),
-        Return[{Indeterminate, Indeterminate}];
     ];
     
     (* Top form *)
@@ -537,19 +621,6 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         \[Kappa] = 1/Mean[allPts[[;;, 2]]];
         allPts[[;;, 2]] = allPts[[;;, 2]] * \[Kappa];
     ];
-
-    (* NEW DEBUG PRINTS HERE *)
-    Print["SamplePointsIPS: First 3 points and their weights:"];
-    Print["  Point 1: ", allPts[[1, 1]], " -> weight: ", allPts[[1, 2]]];
-    If[Length[allPts] >= 2,
-        Print["  Point 2: ", allPts[[2, 1]], " -> weight: ", allPts[[2, 2]]];
-    ];
-    If[Length[allPts] >= 3,
-        Print["  Point 3: ", allPts[[3, 1]], " -> weight: ", allPts[[3, 2]]];
-    ];
-    Print["SamplePointsIPS: Weight statistics - Min: ", Min[allPts[[;;, 2]]], 
-          ", Max: ", Max[allPts[[;;, 2]]], ", Mean: ", Mean[allPts[[;;, 2]]]];
-    Print["SamplePointsIPS: L matrix being used: ", L[[1, 1;;2, 1;;2]]];
     
     Return[{allPts, \[Kappa]}];
 )];

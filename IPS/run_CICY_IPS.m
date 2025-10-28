@@ -10,16 +10,31 @@ exponents = {{{5,0,0,0,0}, {0,5,0,0,0}, {0,0,5,0,0},
               {0,0,0,5,0}, {0,0,0,0,5}, {1,1,1,1,1}}}; *)
 
 (* Weierstrss Cubic Inputs *)
-dimPs = {2};
+(* dimPs = {2};
 coefficients = {{1.0, -4.0, 189.07272}};
-exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}};
+exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}}; *)
+
+(* Schoen split bicubic *)
+dimPs = {2, 2};
+coefficients = {
+  {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0},
+  {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
+};
+exponents = {
+  {{3,0,0,0,0,0}, {0,3,0,0,0,0}, {0,0,3,0,0,0}, 
+   {0,0,0,3,0,0}, {0,0,0,0,3,0}, {0,0,0,0,0,3},
+   {1,1,1,0,0,0}, {0,0,0,1,1,1}, {1,0,0,1,0,0}, {0,1,0,0,1,0}},
+  {{3,0,0,0,0,0}, {0,3,0,0,0,0}, {0,0,3,0,0,0},
+   {0,0,0,3,0,0}, {0,0,0,0,3,0}, {0,0,0,0,0,3},
+   {1,1,1,0,0,0}, {0,0,0,1,1,1}, {0,1,0,1,0,0}, {1,0,0,0,1,0}}
+};
 
 (* Number of regions *)
-numRegions = 11;
+numRegions = 5;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    20000,      (* total points *)
+    200,      (* total points *)
     numRegions,         (* regions *)
     dimPs,
     coefficients,
@@ -86,7 +101,7 @@ If[Length[validIndices] == 0,
   Print["First weight: ", weightsNumeric[[1]]];
 
   (*Export*)
-  dir  = "/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output";
+  dir  = "/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/schoen_bicubic";
 
   ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
   Export[FileNameJoin[{dir, ptsRealFile}], Re[pointCoordsNumeric]];
