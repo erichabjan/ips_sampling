@@ -14,27 +14,47 @@ exponents = {{{5,0,0,0,0}, {0,5,0,0,0}, {0,0,5,0,0},
 coefficients = {{1.0, -4.0, 189.07272}};
 exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}}; *)
 
-(* Schoen split bicubic *)
+(* bicubic *)
 dimPs = {2, 2};
+coefficients = {{
+  1, 1, 1, 1, 1, 1
+}};
+exponents = {{
+  {3,0,0, 0,3,0},
+  {0,3,0, 3,0,0},
+  {2,1,0, 1,2,0},
+  {1,2,0, 2,1,0},
+  {1,0,2, 0,1,2},
+  {0,1,2, 1,0,2}
+}};
+
+(* split bicubic *)
+(* dimPs = {2, 2, 1};
 coefficients = {
-  {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0},
-  {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
+  {1, 1, 1, 1},
+  {1, 1, 1, 1}
 };
 exponents = {
-  {{3,0,0,0,0,0}, {0,3,0,0,0,0}, {0,0,3,0,0,0}, 
-   {0,0,0,3,0,0}, {0,0,0,0,3,0}, {0,0,0,0,0,3},
-   {1,1,1,0,0,0}, {0,0,0,1,1,1}, {1,0,0,1,0,0}, {0,1,0,0,1,0}},
-  {{3,0,0,0,0,0}, {0,3,0,0,0,0}, {0,0,3,0,0,0},
-   {0,0,0,3,0,0}, {0,0,0,0,3,0}, {0,0,0,0,0,3},
-   {1,1,1,0,0,0}, {0,0,0,1,1,1}, {0,1,0,1,0,0}, {1,0,0,0,1,0}}
-};
+  {
+    {3,0,0, 0,0,0, 1,0},
+    {0,3,0, 0,0,0, 0,1},
+    {1,1,1, 0,0,0, 1,0},
+    {2,1,0, 0,0,0, 0,1}
+  },
+  {
+    {0,0,0, 3,0,0, 1,0},
+    {0,0,0, 0,3,0, 0,1},
+    {0,0,0, 1,1,1, 1,0},
+    {0,0,0, 2,1,0, 0,1}
+  }
+}; *)
 
 (* Number of regions *)
-numRegions = 5;
+numRegions = 1;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    200,      (* total points *)
+    20000,      (* total points *)
     numRegions,         (* regions *)
     dimPs,
     coefficients,
@@ -77,7 +97,7 @@ NumericPointQ[pt_] := And @@ (NumericQ /@ Flatten[pt]);
 
 (*Filter to only keep numeric points*)
 validIndices = 
-  Position[pointCoords, _?NumericPointQ, {1}] // Flatten;
+  Position[pointCoords, _?NumericPointQ, {1}]
 Print["Valid points: ", Length[validIndices], " out of ", 
   Length[pointCoords]];
 
@@ -95,19 +115,32 @@ If[Length[validIndices] == 0,
   weightsNumeric = N[weightsClean, 20];
   omegasNumeric = N[omegasClean, 20];
   kappasNumeric = N[kappasData, 20];
+  FlattenPoint[pt_] := Join @@ pt;
+  pointCoordsNumericFlat =
+  If[ArrayDepth[pointCoordsNumeric[[1]]] >= 2,
+     FlattenPoint /@ pointCoordsNumeric,
+     pointCoordsNumeric
+  ];
+  coordsReal = N[Re[pointCoordsNumericFlat], 20];
+  coordsImag = N[Im[pointCoordsNumericFlat], 20];
+
   (*Verify they are all numeric*)
-  Print["Point shape: ", Dimensions[pointCoordsNumeric]];
-  Print["First point: ", pointCoordsNumeric[[1]]];
+  Print["Point shape: ", Dimensions[coordsReal]];
+  Print["First point: ", coordsReal[[1]]];
   Print["First weight: ", weightsNumeric[[1]]];
 
   (*Export*)
-  dir  = "/Users/erich/Downloads/Northeastern/IPS_home/Data/ips_output/schoen_bicubic";
+  dir  = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/bicubic";
 
-  ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
-  Export[FileNameJoin[{dir, ptsRealFile}], Re[pointCoordsNumeric]];
+  (* ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, ptsRealFile}], coordsReal, "CSV", "FieldSeparators" -> {","}]; *)
+  ptsRealFile = StringTemplate["points_real_``.npy"][numRegions];
+  Export[FileNameJoin[{dir, ptsRealFile}], coordsReal];
 
-  ptsImgFile = StringTemplate["points_imag_``.csv"][numRegions];
-  Export[FileNameJoin[{dir, ptsImgFile}], Im[pointCoordsNumeric]];
+  (* ptsImgFile = StringTemplate["points_imag_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, ptsImgFile}],  coordsImag, "CSV", "FieldSeparators" -> {","}]; *)
+  ptsImgFile = StringTemplate["points_imag_``.npy"][numRegions];
+  Export[FileNameJoin[{dir, ptsImgFile}], coordsImag];
 
   weightsFile = StringTemplate["weights_``.csv"][numRegions];
   Export[FileNameJoin[{dir, weightsFile}], weightsNumeric];

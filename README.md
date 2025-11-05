@@ -11,7 +11,7 @@ In the image below, you see the current sampling ability of `cymetric` on the We
 The sampling method used to create the image above was applied in to calculate the CY metric [in this paper](https://arxiv.org/abs/2205.13408). Although this sampling was used to compute the Ricci-flat CY metric, we aim to sample the CYs more effectively using the IPS method from the Keller and Lukic paper. The sampling ability of the IPS implementation is shown below:
 
 <p align="center">
-  <img src="IPS/uniform_weierstrass_cubic_ips.png" alt="ips" width="400" />
+  <img src="IPS/uniform_weierstrass_cubic_ips.png" alt="ips" style="width:100%; height:auto; display:block; margin:0 auto;" />
 </p>
 
 Each color of the sampled points represents an optimally chosen metric found by finding the over- or under-represented sampled patches on the CICY. This algorithm is implemented in `PointGeneratorMathematicaCICYIPS.m`.  
