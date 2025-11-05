@@ -14,4 +14,4 @@ The sampling method used to create the image above was applied in to calculate t
   <img src="IPS/uniform_weierstrass_cubic_ips.png" alt="ips" style="width:100%; height:auto; display:block; margin:0 auto;" />
 </p>
 
-Each color of the sampled points represents an optimally chosen metric found by finding the over- or under-represented sampled patches on the CICY. This algorithm is implemented in `PointGeneratorMathematicaCICYIPS.m`.  
+Each panel shows 1, 2, 3, 5, 11, and 19 different optimally chosen metrics. Each color of the sampled points represents a different metric found by finding the over- or under-represented sampled patches on the CICY. This algorithm is implemented in `PointGeneratorMathematicaCICYIPS.m`.  
