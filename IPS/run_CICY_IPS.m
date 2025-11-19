@@ -50,7 +50,7 @@ exponents = {
 }; *)
 
 (* Number of regions *)
-numRegions = 1;
+numRegions = 11;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
@@ -64,30 +64,16 @@ numRegions = 1;
     True       (* frontEnd *)
 ];
 
-(* Export results *)
 Print["Checking data structure..."];
 Print["Length of points: ", Length[points]];
-Print["First element type: ", Head[points[[1]]]];
+Print["Head of first point: ", Head[points[[1]]]];
+Print["Dimensions of first point: ", Dimensions[points[[1]]]];
 
-(*The points variable seems to be the full output*)
-
-(*Check if points is the raw output \
-{pts,weights,omegas,kappas,{dimCY}}*)
-If[Length[Dimensions[points]] == 1 && 
-   Length[points] == 5,(*points is the full output tuple*)
-  Print["Points is the full output tuple"];
-  pointCoords = points[[1]];
-  weightsData = points[[2]];
-  omegasData = points[[3]];
-  kappasData = points[[4]];
-  dimCYData = 
-   points[[5, 1]];,(*points is already just the coordinates*)
-  Print["Points is coordinate list"];
-  pointCoords = points;
-  weightsData = weights;
-  omegasData = omegas;
-  kappasData = kappas;
-  dimCYData = dimCY;];
+pointCoords = points;
+weightsData = weights;
+omegasData  = omegas;
+kappasData  = kappas;
+dimCYData   = dimCY;
 
 (*Now force numerical evaluation and remove any bad points*)
 Print["Filtering and evaluating points..."];
@@ -95,51 +81,52 @@ Print["Filtering and evaluating points..."];
 (*Function to check if a point is purely numerical*)
 NumericPointQ[pt_] := And @@ (NumericQ /@ Flatten[pt]);
 
-(*Filter to only keep numeric points*)
-validIndices = 
-  Position[pointCoords, _?NumericPointQ, {1}]
-Print["Valid points: ", Length[validIndices], " out of ", 
-  Length[pointCoords]];
+(* Boolean mask of which points are good *)
+validMask = NumericPointQ /@ pointCoords;
 
-If[Length[validIndices] == 0, 
+Print["Valid points: ", Count[validMask, True], " out of ", Length[pointCoords]];
+
+If[Count[validMask, True] == 0,
+  
+  (* No good points: just print some diagnostics *)
   Print["ERROR: No valid numeric points found!"];
-  Print["First few points: ", 
-   Take[pointCoords, 
-    Min[3, Length[
-      pointCoords]]]];,(*Extract valid points and corresponding data*)
-  pointCoordsClean = pointCoords[[validIndices]];
-  weightsClean = weightsData[[validIndices]];
-  omegasClean = omegasData[[validIndices]];
-  (*Force numerical evaluation*)
+  Print["First few points: ",
+        Take[pointCoords, Min[3, Length[pointCoords]]]],
+  
+  (* Else: keep only numeric points and corresponding data *)
+  pointCoordsClean = Pick[pointCoords, validMask];
+  weightsClean     = Pick[weightsData,  validMask];
+  omegasClean      = Pick[omegasData,   validMask];
+
+  (* Force numerical evaluation *)
   pointCoordsNumeric = N[pointCoordsClean, 20];
-  weightsNumeric = N[weightsClean, 20];
-  omegasNumeric = N[omegasClean, 20];
-  kappasNumeric = N[kappasData, 20];
+  weightsNumeric     = N[weightsClean,     20];
+  omegasNumeric      = N[omegasClean,      20];
+  kappasNumeric      = N[kappasData,      20];
+
+  (* Flatten per point if they come as nested lists *)
   FlattenPoint[pt_] := Join @@ pt;
   pointCoordsNumericFlat =
-  If[ArrayDepth[pointCoordsNumeric[[1]]] >= 2,
-     FlattenPoint /@ pointCoordsNumeric,
-     pointCoordsNumeric
-  ];
+    If[ArrayDepth[pointCoordsNumeric[[1]]] >= 2,
+       FlattenPoint /@ pointCoordsNumeric,
+       pointCoordsNumeric
+    ];
+
+  (* Split real and imaginary parts *)
   coordsReal = N[Re[pointCoordsNumericFlat], 20];
   coordsImag = N[Im[pointCoordsNumericFlat], 20];
 
-  (*Verify they are all numeric*)
-  Print["Point shape: ", Dimensions[coordsReal]];
-  Print["First point: ", coordsReal[[1]]];
+  (* Verify they are all numeric *)
+  Print["Point shape (real coords): ", Dimensions[coordsReal]];
+  Print["First point (real part): ", coordsReal[[1]]];
   Print["First weight: ", weightsNumeric[[1]]];
 
-  (*Export*)
-  dir  = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/bicubic";
+  dir = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/bicubic";
 
-  (* ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
-  Export[FileNameJoin[{dir, ptsRealFile}], coordsReal, "CSV", "FieldSeparators" -> {","}]; *)
-  ptsRealFile = StringTemplate["points_real_``.npy"][numRegions];
+  ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
   Export[FileNameJoin[{dir, ptsRealFile}], coordsReal];
 
-  (* ptsImgFile = StringTemplate["points_imag_``.csv"][numRegions];
-  Export[FileNameJoin[{dir, ptsImgFile}],  coordsImag, "CSV", "FieldSeparators" -> {","}]; *)
-  ptsImgFile = StringTemplate["points_imag_``.npy"][numRegions];
+  ptsImgFile = StringTemplate["points_imag_``.csv"][numRegions];
   Export[FileNameJoin[{dir, ptsImgFile}], coordsImag];
 
   weightsFile = StringTemplate["weights_``.csv"][numRegions];
@@ -151,11 +138,18 @@ If[Length[validIndices] == 0,
   kappasFile = StringTemplate["kappas_``.csv"][numRegions];
   Export[FileNameJoin[{dir, kappasFile}], kappasNumeric];
 
-  (*Export metadata*)
+  (* Export metadata *)
   metafile = StringTemplate["metadata_``.json"][numRegions];
-  Export[FileNameJoin[{dir, metafile}], {"dim_cy" ->
-      dimCYData, "num_points" -> Length[pointCoordsNumeric], 
-    "num_regions" -> Length[kappasNumeric], 
-    "point_dimension" -> Length[pointCoordsNumeric[[1]]]}, "JSON"];
-  Print["Successfully exported ", Length[pointCoordsNumeric], 
-   " clean points!"];];
+  Export[
+    FileNameJoin[{dir, metafile}],
+    {
+      "dim_cy"          -> dimCYData,
+      "num_points"      -> Length[pointCoordsNumeric],
+      "num_regions"     -> Length[kappasNumeric],
+      "point_dimension" -> Length[pointCoordsNumeric[[1]]]
+    },
+    "JSON"
+  ];
+
+  Print["Successfully exported ", Length[pointCoordsNumeric], " clean points!"];
+];

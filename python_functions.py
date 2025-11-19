@@ -121,3 +121,88 @@ def sampling_plot(Z_in, q=0.995, eps=1e-14, s=1.0, alpha=0.8, color='k', equal_a
 
     plt.tight_layout()
     return fig, axes
+
+
+def multi_sampling_plot(Z_in, q=0.995, eps=1e-14, s=1.0, alpha=0.8,
+                  color='k', equal_aspect=False, n_segments=1):
+    """
+    Plot Re(Z_1/Z_0) vs Re(Z_k/Z_0) for k=2..M-1 as M-2 panels in a row.
+
+    Parameters
+    ----------
+    Z_in : array-like, shape (N, M)
+        Complex (or real) array with columns Z_0, Z_1, ..., Z_{M-1}.
+    q : float, optional
+        Central quantile to retain (e.g., 0.995 keeps the middle 99.5%).
+        Used to clip both X (per panel) and Y (shared across panels).
+    eps : float, optional
+        Threshold to mask |Z_0| to avoid division by (near) zero.
+    s, alpha, color : matplotlib scatter kwargs
+        If color is None, Matplotlib's color cycle is used, which is
+        useful when plotting multiple segments in different colors.
+    equal_aspect : bool
+        If True, set each panel to equal aspect ('box').
+    n_segments : int
+        Number of chunks to split the data into along the sample axis.
+        Each chunk is plotted with a separate scatter call (different color).
+
+    Returns
+    -------
+    fig, axes : matplotlib Figure and Axes
+    """
+    Z = np.asarray(Z_in)
+    if Z.ndim != 2:
+        raise ValueError("Z_in must be a 2D array of shape (N, M).")
+    N, M = Z.shape
+    if M < 3:
+        raise ValueError("Z_in must have at least 3 columns (Z_0, Z_1, Z_2).")
+
+    # Mask to avoid dividing by tiny Z_0
+    mask = np.abs(Z[:, 0]) > eps
+    if not np.any(mask):
+        raise ValueError("All rows have |Z_0| <= eps; nothing to plot.")
+    Z = Z[mask]
+
+    denom = Z[:, 0]
+    Y = np.real(Z[:, 1] / denom)
+
+    # Shared Y clipping across all panels
+    lo_y, hi_y = np.quantile(Y, 1 - q), np.quantile(Y, q)
+
+    # Prepare segmentation indices
+    N_eff = Y.shape[0]
+    if n_segments is None or n_segments < 1:
+        n_segments = 1
+    seg_size = int(np.ceil(N_eff / n_segments))
+    segments = [slice(j, min(j + seg_size, N_eff))
+                for j in range(0, N_eff, seg_size)]
+
+    ncols = M - 2
+    fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4), sharey=True)
+    if ncols == 1:
+        axes = [axes]
+
+    for i, k in enumerate(range(2, M)):
+        Xk = np.real(Z[:, k] / denom)
+        # Per-panel X clipping
+        lo_x, hi_x = np.quantile(Xk, 1 - q), np.quantile(Xk, q)
+
+        # Plot each segment separately to get multiple colors
+        for seg in segments:
+            X_seg = np.clip(Xk[seg], lo_x, hi_x)
+            Y_seg = np.clip(Y[seg], lo_y, hi_y)
+            if color is None:
+                # Let Matplotlib use its color cycle
+                axes[i].scatter(X_seg, Y_seg, s=s, alpha=alpha)
+            else:
+                axes[i].scatter(X_seg, Y_seg, c=color, s=s, alpha=alpha)
+
+        if equal_aspect:
+            axes[i].set_aspect('equal', 'box')
+
+        axes[i].set_xlabel(rf'Re$(Z_{k}/Z_0)$', fontsize=12)
+        if i == 0:
+            axes[i].set_ylabel(r'Re$(Z_1/Z_0)$', fontsize=12)
+
+    plt.tight_layout()
+    return fig, axes
