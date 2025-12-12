@@ -15,7 +15,7 @@ coefficients = {{1.0, -4.0, 189.07272}};
 exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}}; *)
 
 (* bicubic *)
-dimPs = {2, 2};
+(* dimPs = {2, 2};
 coefficients = {{
   1, 1, 1, 1, 1, 1
 }};
@@ -26,7 +26,7 @@ exponents = {{
   {1,2,0, 2,1,0},
   {1,0,2, 0,1,2},
   {0,1,2, 1,0,2}
-}};
+}}; *)
 
 (* split bicubic *)
 (* dimPs = {2, 2, 1};
@@ -48,6 +48,40 @@ exponents = {
     {0,0,0, 2,1,0, 0,1}
   }
 }; *)
+
+(* multi-equation CICY *)
+dimPs = {3, 3};
+coefficients = {
+  {1, 1, 1, 1},
+  {1, 1, 1, 1},
+  {1, 1, 1, 1} 
+};
+
+exponents = {
+  (* Equation 1: cubic in first P^3 only, degree (3,0) *)
+  {
+    {3, 0, 0, 0,  0, 0, 0, 0},   (* x0^3 *)
+    {2, 1, 0, 0,  0, 0, 0, 0},   (* x0^2 x1 *)
+    {0, 1, 1, 1,  0, 0, 0, 0},   (* x1 x2 x3 *)
+    {0, 0, 3, 0,  0, 0, 0, 0}    (* x2^3 *)
+  },
+
+  (* Equation 2: cubic in second P^3 only, degree (0,3) *)
+  {
+    {0, 0, 0, 0,  3, 0, 0, 0},   (* y0^3 *)
+    {0, 0, 0, 0,  2, 1, 0, 0},   (* y0^2 y1 *)
+    {0, 0, 0, 0,  0, 1, 1, 1},   (* y1 y2 y3 *)
+    {0, 0, 0, 0,  0, 0, 0, 3}    (* y3^3 *)
+  },
+
+  (* Equation 3: bilinear, degree (1,1) *)
+  {
+    {1, 0, 0, 0,  1, 0, 0, 0},   (* x0 y0 *)
+    {0, 1, 0, 0,  0, 1, 0, 0},   (* x1 y1 *)
+    {0, 0, 1, 0,  0, 0, 1, 0},   (* x2 y2 *)
+    {0, 0, 0, 1,  0, 0, 0, 1}    (* x3 y3 *)
+  }
+};
 
 (* Number of regions *)
 numRegions = 11;
@@ -121,7 +155,7 @@ If[Count[validMask, True] == 0,
   Print["First point (real part): ", coordsReal[[1]]];
   Print["First weight: ", weightsNumeric[[1]]];
 
-  dir = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/bicubic";
+  dir = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/multi_eq";
 
   ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
   Export[FileNameJoin[{dir, ptsRealFile}], coordsReal];

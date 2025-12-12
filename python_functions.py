@@ -124,7 +124,7 @@ def sampling_plot(Z_in, q=0.995, eps=1e-14, s=1.0, alpha=0.8, color='k', equal_a
 
 
 def multi_sampling_plot(Z_in, q=0.995, eps=1e-14, s=1.0, alpha=0.8,
-                  color='k', equal_aspect=False, n_segments=1):
+                  color='k', equal_aspect=False, n_segments=1, fontsize = 12):
     """
     Plot Re(Z_1/Z_0) vs Re(Z_k/Z_0) for k=2..M-1 as M-2 panels in a row.
 
@@ -200,9 +200,9 @@ def multi_sampling_plot(Z_in, q=0.995, eps=1e-14, s=1.0, alpha=0.8,
         if equal_aspect:
             axes[i].set_aspect('equal', 'box')
 
-        axes[i].set_xlabel(rf'Re$(Z_{k}/Z_0)$', fontsize=12)
+        axes[i].set_xlabel(rf'Re$(Z_{k}/Z_0)$', fontsize=fontsize)
         if i == 0:
-            axes[i].set_ylabel(r'Re$(Z_1/Z_0)$', fontsize=12)
+            axes[i].set_ylabel(r'Re$(Z_1/Z_0)$', fontsize=fontsize)
 
     plt.tight_layout()
     return fig, axes
