@@ -495,6 +495,14 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
             {j, Length[coefficients[[i]]]}],
         {i, Length[coefficients]}
     ];
+
+    (* Tolerance *)
+    eqnTol = 10^(-Floor[precision/2]);
+
+    eqnResidual[pt_List] := Module[{vals},
+    vals = (eqns /. Thread[varsFlat -> SetPrecision[pt, precision]]);
+    Max[Abs[N[vals, precision]]]
+    ];
     
     (* Determine parameter distribution (same as original code) *)
     conf = {};
@@ -548,32 +556,67 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
     ];
     
     (* Generate points *)
-    numPoints = Ceiling[numPts / 5];
+
     Clear[t];
     params = Table[
         Join[{1}, Table[Subscript[t, j, k], {k, numParamsInPn[[j]]}]],
         {j, Length[numParamsInPn]}
     ];
+
+    ptsGood = {};
+    tries = 0;
+    maxTries = 200;
+
+    numPoints = Ceiling[numPts / 5];
+
+    While[Length[ptsGood] < numPts && tries < maxTries,
+        tries++;
     
-    pointsOnSphere = ParallelTable[
-        SamplePointsOnSphere[dimPs[[i]] + 1, numPoints (numParamsInPn[[i]] + 1)],
-        {i, Length[dimPs]},
-        DistributedContexts -> Automatic
+        pointsOnSphere = ParallelTable[
+            SamplePointsOnSphere[dimPs[[i]] + 1, numPoints (numParamsInPn[[i]] + 1)],
+            {i, Length[dimPs]},
+            DistributedContexts -> Automatic
+        ];
+
+        Print["SamplePointsIPS: Batch ", tries, " sampling ", numPoints,
+            " intersections (need ", (numPts - Length[ptsGood]), " more)."];
+
+        (* Sample points with metric transformation *)
+        ptsBatch = ParallelTable[
+            getPointsOnCYIPS[varsUnflat, numParamsInPn, dimPs, params,
+                Table[pointsOnSphere[[i, p + (b - 1) numPoints]], 
+                    {i, Length[pointsOnSphere]}, {b, 1 + numParamsInPn[[i]]}],
+                eqns, L, precision],
+            {p, numPoints},
+            DistributedContexts -> Automatic
+        ];
+    
+        ptsBatch = Flatten[ptsBatch, 1];
+        Print["SamplePointsIPS: Batch ", tries, " produced ", Length[ptsBatch], " raw points."];
+
+        (* Residuals + filtering *)
+        residuals = ParallelMap[eqnResidual, ptsBatch, DistributedContexts -> Automatic];
+        mask = residuals < eqnTol;
+
+        ptsKeep = Pick[ptsBatch, mask];
+        nKeep = Length[ptsKeep];
+
+        ptsGood = Join[ptsGood, ptsKeep];
+
+        Print["SamplePointsIPS: Batch ", tries, " kept ", nKeep,
+          " points (eqnTol=", eqnTol, "). Total kept = ", Length[ptsGood], "."];
+        ];
+    
+    If[Length[ptsGood] < numPts,
+    Print["ERROR: Could not collect enough valid points. Got ", Length[ptsGood],
+          " but need ", numPts, " after ", tries, " batches.",
+          " Consider loosening eqnTol or increasing precision."];
+    Return[{$Failed, $Failed}];
     ];
 
-    Print["SamplePointsIPS: About to sample ", numPoints, " intersections with L having dimensions: ", Dimensions /@ L];
-    (* Sample points with metric transformation *)
-    pts = ParallelTable[
-        getPointsOnCYIPS[varsUnflat, numParamsInPn, dimPs, params,
-            Table[pointsOnSphere[[i, p + (b - 1) numPoints]], 
-                {i, Length[pointsOnSphere]}, {b, 1 + numParamsInPn[[i]]}],
-            eqns, L, precision],
-        {p, numPoints},
-        DistributedContexts -> Automatic
-    ];
-    
-    pts = Flatten[pts, 1];
-    Print["SamplePointsIPS: Found ", Length[pts], " raw points"];
+    pts = ptsGood;
+
+    Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts, ")."];
     
     (* Compute metric *)
     g = getFS[varsUnflat, bvarsUnflat, Table[ConjugateTranspose[L[[k]]] . L[[k]], {k, Length[L]}]];
