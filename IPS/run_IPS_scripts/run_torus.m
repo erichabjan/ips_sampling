@@ -7,11 +7,11 @@ coefficients = {{1.0, -4.0, 189.07272}};
 exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}};
 
 (* Number of regions *)
-numRegions = 3;
+numRegions = 19;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    200,                (* total points *)
+    20000,                (* total points *)
     numRegions,         (* regions *)
     dimPs,
     coefficients,

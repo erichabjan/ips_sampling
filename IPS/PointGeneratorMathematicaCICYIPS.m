@@ -1,14 +1,17 @@
-(* ::Package:: *)
-
-(* Improved Point Sampling for CICYs *)
+(* Improved Point Sampling for CICYs developed by Eric Habjan *)
 (* Based on Keller-Lukic 0907.1387 Section 3.2 *)
 
+
+(* Sample points on sphere *)
 SamplePointsOnSphere[dimP_, numPts_] := Module[{randomPoints}, (
+
     randomPoints = RandomVariate[NormalDistribution[], {numPts, dimP, 2}];
     randomPoints = randomPoints[[;;, ;;, 1]] + I randomPoints[[;;, ;;, 2]];
     randomPoints = Normalize /@ randomPoints;
     Return[randomPoints];
+
 )];
+
 
 PrintMsg[msg_, frontEnd_, verbose_] := Module[{}, (
     If[verbose > 0,
@@ -20,6 +23,7 @@ PrintMsg[msg_, frontEnd_, verbose_] := Module[{}, (
         ];
     ];
 )];
+
 
 (* Compute Fubini-Study metric with optional Hermitian matrix h *)
 getFS[varsUnflat_, bvarsUnflat_, h_: {}, kval_: 1] := Module[{hh, s, bs, kk, dimPs, result, i, j, a, b}, (
@@ -62,19 +66,6 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     maxPos, maxPosGlobal, goodCoordsIndexSet, \[Omega]Top, OmegaOmegaBar, 
     substCoords, substbCoords, jacRows, i, j, a, b, numEqns, dimCY},
     (
-    
-    (* DEBUG: Verify inputs *)
-    If[Length[eqns] != Length[beqns],
-        Print["ERROR: eqns and beqns have different lengths!"];
-        Print["  Length[eqns] = ", Length[eqns]];
-        Print["  Length[beqns] = ", Length[beqns]];
-        Return[{Indeterminate, Indeterminate}];
-    ];
-
-    If[!And @@ (NumericQ /@ Flatten[pt]),
-        Print["ERROR: Point has non-numeric values!"];
-        Return[{Indeterminate, Indeterminate}];
-    ];
 
     numEqns = Length[eqns];
     dimCY = Length[varsFlat] - numEqns;
@@ -104,14 +95,6 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
             {j, Length[localbCoords]}
         ] /. substbCoords;
         AppendTo[bjacRows, bderivs];
-    ];
-
-    (* Optional sanity check (helps catch the exact failure in your logs): *)
-    If[Length[bjacRows] != numEqns || Length[bjacRows[[1]]] != Length[localbCoords],
-        Print["ERROR in bjacRows construction!"];
-        Print["  Expected dimensions: ", {numEqns, Length[localbCoords]}];
-        Print["  Actual dimensions: ", Dimensions[bjacRows]];
-        Return[{Indeterminate, Indeterminate}];
     ];
 
     detTol  = 10^-6;       (* numerical threshold for smallest singular value *)
@@ -207,20 +190,6 @@ getWeightOmegas[varsFlat_, bvarsFlat_, varsUnflat_, dimPs_, g_, eqns_, beqns_, p
     (* Build antiholomorphic Jacobian submatrix *)
     bjacSubmatrix = Table[bjacRows[[alpha, maxPoss[[beta]]]], {alpha, numEqns}, {beta, numEqns}];
     bjacSubmatrixInv = Inverse[bjacSubmatrix];
-
-    If[Length[bjacRows] != numEqns || Length[bjacRows[[1]]] != Length[localCoords],
-        Print["ERROR in bjacRows construction!"];
-        Print["  Expected dimensions: ", {numEqns, Length[localCoords]}];
-        Print["  Actual dimensions: ", Dimensions[bjacRows]];
-        Return[{Indeterminate, Indeterminate}];
-    ];
-
-    If[Abs[Det[jacSubmatrix]] < 10^(-10) || Abs[Det[bjacSubmatrix]] < 10^(-10),
-        Print["ERROR: Selected Jacobians are singular!"];
-        Print["  |det(J)| = ", Abs[Det[jacSubmatrix]]];
-        Print["  |det(J̄)| = ", Abs[Det[bjacSubmatrix]]];
-        Return[{Indeterminate, Indeterminate}];
-    ];
 
     (* DEBUG: Check if antiholomorphic Jacobian is singular *)
     If[!And @@ (NumericQ /@ Flatten[bjacSubmatrixInv]),
@@ -394,21 +363,27 @@ GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, b
     }];
 )];
 
+(* Patch Normalization Functions *)
+splitByBlocks[pt_, dimPs_] := TakeList[pt, dimPs + 1];
+
+patchNormalizeFlatPoint[pt_, dimPs_, denomTol_: 10^-30] := Module[
+  {blocks, absBlocks, localMaxPos, denoms, normBlocks},
+  blocks = splitByBlocks[pt, dimPs];
+  absBlocks = Abs /@ blocks;
+  localMaxPos = Ordering[#, -1][[1]] & /@ absBlocks;
+  denoms = MapThread[#1[[#2]] &, {blocks, localMaxPos}];
+  If[Min[Abs[denoms]] < denomTol, Return[$Failed]];
+  normBlocks = MapThread[#1/#2 &, {blocks, denoms}];
+  Chop @ Flatten[normBlocks]
+];
+
+
 (* Sample points on CICY with given metric *)
 getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_, 
     eqns_, L_, precision_: 20] := Module[
     {subst, pts, i, j, a, b, c, res, maxPoss, absPts, transformedParams, 
-     LInvTranspose, transformedSphere},
+     LInvTranspose, transformedSphere, eqSystem, paramVars},
     (
-    Print["getPointsOnCYIPS: L structure: ", Dimensions /@ L];
-    Print["getPointsOnCYIPS: pointsOnSphere structure: ", Dimensions /@ pointsOnSphere];
-    Print["getPointsOnCYIPS: First L matrix: ", L[[1]]];
-    
-    (* KEY CHANGE: Apply L^{-T} to the sphere points to transform the MEASURE *)
-    (* If L = Cholesky(λ^{-1}), then the transformed inner product is *)
-    (* <v, w>_new = <L^T v, L^T w>_standard *)
-    (* To generate random vectors with respect to this new inner product, *)
-    (* we need to apply L^{-T} to standard normal random vectors *)
     
     (* For each projective space, compute L^{-T} and apply to sphere points *)
     transformedSphere = Table[
@@ -430,17 +405,10 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
                 {b, 1, Length[pointsOnSphere[[j]]]}
             ]
         ],
-        {j, 1, Length[pointsOnSphere]}
+        {j, 1, Length[dimPs]}
     ];
     
-    Print["getPointsOnCYIPS: Sample transformed sphere: ", transformedSphere[[1, 1]]];
-    Print["getPointsOnCYIPS: Sample original sphere: ", pointsOnSphere[[1, 1]]];
-    Print["getPointsOnCYIPS: Norm of transformed: ", 
-        Sqrt[Conjugate[transformedSphere[[1, 1]]] . transformedSphere[[1, 1]]]];
-    Print["getPointsOnCYIPS: Are they different? ", 
-        transformedSphere[[1, 1]] != pointsOnSphere[[1, 1]]];
-    
-    (* Now build substitution using transformed sphere points *)
+    (* Build substitution using transformed sphere points *)
     subst = {};
     For[j = 1, j <= Length[dimPs], j++,
         AppendTo[subst, 
@@ -454,25 +422,42 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
     subst = Flatten[subst];
     
     (* Solve for parameters that put us on the CICY *)
-    res = FindInstance[
-        Table[eqns[[i]] == 0, {i, Length[eqns]}] /. subst,
-        Variables[Flatten[params]],
-        Complexes,
-        1000,
-        WorkingPrecision -> precision
-    ];
+    eqSystem = Table[eqns[[i]] == 0, {i, Length[eqns]}] /. subst;
+    eqSystem = SetPrecision[eqSystem, precision];
+
+    paramVars = Flatten[Rest /@ params];
+
+    res = FindInstance[eqSystem, paramVars, Complexes, 1, WorkingPrecision -> precision];
+    res = res /. HoldPattern[Null * r_Rule] :> r /. HoldPattern[r_Rule * Null] :> r;
+    res = Which[
+        res === {} || res === Null || res === $Failed, {},
+        MatchQ[res, {{(_Rule | _RuleDelayed) ..} ..}], res,
+        MatchQ[res, {(_Rule | _RuleDelayed) ..}], {res},
+        True, {}
+        ];
+
     
-    (* Extract points using the transformed parametrization *)
-    pts = Chop[(varsUnflat /. subst) /. res];
+    (*Quiet @ Check[If[Length[paramVars] == 1 && Length[eqSystem] == 1,
+    NSolve[eqSystem, paramVars, WorkingPrecision -> precision, AccuracyGoal -> Floor[precision/2], 
+    PrecisionGoal -> Floor[precision/2]
+    (*, MaxExtraPrecision -> 2 precision, Method -> "EndomorphismMatrix"*)
+    ],
+    FindInstance[eqSystem, paramVars, Complexes, 1000, WorkingPrecision -> precision, AccuracyGoal -> Floor[precision/2],
+    PrecisionGoal -> Floor[precision/2]
+    (*, MaxExtraPrecision -> 2 precision, Method -> "NMinimize"*)
+    ]],
+    {}];*)
+
+    If[res === {} || res === Null, Return[{}]];
+
+    pts = Chop @ N[(varsUnflat /. subst) /. res, precision];
+    pts = Map[Flatten, pts];
+    pts = Select[pts, VectorQ[#, NumericQ] && Length[#] == Length@Flatten[varsUnflat] &];
+    If[pts === {}, Return[{}]];
     
-    (* Go to patch where largest coordinate is 1 *)
-    absPts = Abs[pts];
-    For[i = 1, i <= Length[pts], i++,
-        pts[[i]] = Chop[Flatten[
-            Table[pts[[i, j]] / pts[[i, j, Ordering[absPts[[i, j]], -1][[1]]]], 
-                {j, Length[dimPs]}]
-        ]];
-    ];
+    (* Patch Normalization *)
+    pts = Select[patchNormalizeFlatPoint[#, dimPs] & /@ pts, # =!= $Failed &];
+    If[pts === {}, Return[{}]];
     
     Return[pts];
 )];
@@ -499,12 +484,19 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
     (* Tolerance *)
     eqnTol = 10^(-Floor[precision/2]);
 
-    eqnResidual[pt_List] := Module[{vals},
+    (*eqnResidual[pt_List] := Module[{vals},
     vals = (eqns /. Thread[varsFlat -> SetPrecision[pt, precision]]);
     Max[Abs[N[vals, precision]]]
+    ];*)
+
+    eqnResidual[pt_List] /; VectorQ[pt, NumericQ] && Length[pt] == Length[varsFlat] := Module[{vals},
+    vals = eqns /. Thread[varsFlat -> SetPrecision[pt, precision]];
+    Max[Abs[N[vals, precision]]]
     ];
+
+    eqnResidual[_] := Infinity;
     
-    (* Determine parameter distribution (same as original code) *)
+    (* Determine parameter distribution *)
     conf = {};
     For[i = 1, i <= Length[coefficients], i++,
         start = 1;
@@ -558,10 +550,8 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
     (* Generate points *)
 
     Clear[t];
-    params = Table[
-        Join[{1}, Table[Subscript[t, j, k], {k, numParamsInPn[[j]]}]],
-        {j, Length[numParamsInPn]}
-    ];
+
+    params = Table[Join[{1}, Array[Unique["t"] &, numParamsInPn[[j]]]], {j, Length[numParamsInPn]}];
 
     ptsGood = {};
     tries = 0;
@@ -578,9 +568,6 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
             DistributedContexts -> Automatic
         ];
 
-        Print["SamplePointsIPS: Batch ", tries, " sampling ", numPoints,
-            " intersections (need ", (numPts - Length[ptsGood]), " more)."];
-
         (* Sample points with metric transformation *)
         ptsBatch = ParallelTable[
             getPointsOnCYIPS[varsUnflat, numParamsInPn, dimPs, params,
@@ -592,13 +579,14 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         ];
     
         ptsBatch = Flatten[ptsBatch, 1];
+        ptsBatch = Select[ptsBatch, MatchQ[#, {_?NumericQ ..}] && Length[#] == Length[varsFlat] &];
         Print["SamplePointsIPS: Batch ", tries, " produced ", Length[ptsBatch], " raw points."];
 
         (* Residuals + filtering *)
-        residuals = ParallelMap[eqnResidual, ptsBatch, DistributedContexts -> Automatic];
-        mask = residuals < eqnTol;
+        residuals = eqnResidual /@ ptsBatch;
+        mask = Thread[residuals < eqnTol];
 
-        ptsKeep = Pick[ptsBatch, mask];
+        ptsKeep = Pick[ptsBatch, mask, True];
         nKeep = Length[ptsKeep];
 
         ptsGood = Join[ptsGood, ptsKeep];
@@ -606,13 +594,6 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         Print["SamplePointsIPS: Batch ", tries, " kept ", nKeep,
           " points (eqnTol=", eqnTol, "). Total kept = ", Length[ptsGood], "."];
         ];
-    
-    If[Length[ptsGood] < numPts,
-    Print["ERROR: Could not collect enough valid points. Got ", Length[ptsGood],
-          " but need ", numPts, " after ", tries, " batches.",
-          " Consider loosening eqnTol or increasing precision."];
-    Return[{$Failed, $Failed}];
-    ];
 
     pts = ptsGood;
 
