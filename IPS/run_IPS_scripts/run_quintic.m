@@ -8,11 +8,11 @@ exponents = {{{5,0,0,0,0}, {0,5,0,0,0}, {0,0,5,0,0},
               {0,0,0,5,0}, {0,0,0,0,5}, {1,1,1,1,1}}};
 
 (* Number of regions *)
-numRegions = 3;
+numRegions = 1;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    200,      (* total points *)
+    20000,      (* total points *)
     numRegions,         (* regions *)
     dimPs,
     coefficients,

@@ -16,7 +16,7 @@ exponents = {{
 }};
 
 (* Number of regions *)
-numRegions = 11;
+numRegions = 1;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
