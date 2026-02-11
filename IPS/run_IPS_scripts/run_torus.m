@@ -1,5 +1,5 @@
 (* Import CICY IPS sampler *)
-Get["/Users/erich/Downloads/Northeastern/IPS_home/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
+Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
 (* Weierstrss Cubic Inputs *)
 dimPs = {2};
@@ -7,7 +7,7 @@ coefficients = {{1.0, -4.0, 189.07272}};
 exponents = {{{1,0,2}, {0,3,0}, {2,1,0}}};
 
 (* Number of regions *)
-numRegions = 19;
+numRegions = 1;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
@@ -78,7 +78,7 @@ If[Count[validMask, True] == 0,
   Print["First point (real part): ", coordsReal[[1]]];
   Print["First weight: ", weightsNumeric[[1]]];
 
-  dir = "/Users/erich/Downloads/Northeastern/ips_home/Data/ips_output/weierstrass";
+  dir = "/home/habjan.e/CY_metric/data/ips_mathematica_output/torus";
 
   ptsRealFile = StringTemplate["points_real_``.csv"][numRegions];
   Export[FileNameJoin[{dir, ptsRealFile}], coordsReal];

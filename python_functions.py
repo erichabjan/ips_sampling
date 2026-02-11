@@ -352,7 +352,7 @@ def christoffel(g_model, pts):
     d_g_pb = tf.einsum('xbn,xcdn->xbcd', pbs, d_g)
     gamma = tf.einsum('xbcd, xda->xabc', d_g_pb, tf.linalg.inv(g))
     return gamma
-    
+
 def riemann(g_model, pts):  # return R^a_{b\bar c d}
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(pts)

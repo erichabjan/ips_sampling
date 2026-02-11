@@ -4,7 +4,7 @@ from cymetric.pointgen.pointgen_cicy import CICYPointGenerator
 
 quintic_type = 'dwork'
 
-fname = f"/Users/erich/Downloads/Northeastern/ips_home/Data/{quintic_type}_quintic"
+fname = f"/home/habjan.e/CY_metric/data/{quintic_type}_quintic"
 
 # Ambient space dimension
 ambient = np.array([4], dtype=np.int64)
