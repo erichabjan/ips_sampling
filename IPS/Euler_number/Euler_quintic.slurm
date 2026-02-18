@@ -13,4 +13,4 @@ export CUDA_VISIBLE_DEVICES=""
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate IPSenv
 
-python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number/Euler_bicubic.py
+python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number/Euler_quintic.py

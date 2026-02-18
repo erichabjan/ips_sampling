@@ -12,7 +12,7 @@ numRegions = 1;
 
 (* Generate points *)
 {points, weights, omegas, kappas, {dimCY}} = GeneratePointsMCICYIPS[
-    20000,      (* total points *)
+    100000,      (* total points *)
     numRegions,         (* regions *)
     dimPs,
     coefficients,

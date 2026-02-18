@@ -2,7 +2,7 @@ import numpy as np
 import mpmath as mp
 from cymetric.pointgen.pointgen_cicy import CICYPointGenerator
 
-fname = f"/Users/erich/Downloads/Northeastern/ips_home/Data/bicubic"
+fname = f"/home/habjan.e/CY_metric/data/bicubic"
 
 # Ambient space dimension
 ambient = np.array([2, 2], dtype=np.int64)
