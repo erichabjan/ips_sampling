@@ -543,6 +543,56 @@ def integrate_variance_kappa_weighted(integrand, pts, wo, comp_model, variances=
         res *= tf.cast(kappa, dtype=res.dtype)
     return res
 
+def config_matrix_from_metadata(metadata):
+    """
+    Build CICY configuration matrix from metadata['exponents'] and metadata['dimPs'].
+
+    Returns
+    -------
+    ambient : list[int]
+        Ambient projective dimensions, e.g. [4] or [2,2]
+    config : list[list[int]]
+        Configuration matrix rows (one row per equation), e.g. [[5]] or [[3,3]]
+    """
+    ambient = [int(x) for x in metadata["dimPs"]]
+    exponents = metadata["exponents"]
+
+    block_sizes = [n + 1 for n in ambient]
+    config = []
+
+    for eq_idx, eq_monomials in enumerate(exponents):
+        eq_monomials = np.asarray(eq_monomials, dtype=int)
+
+        if eq_monomials.ndim != 2:
+            raise ValueError(f"Equation {eq_idx} exponents must be 2D, got shape {eq_monomials.shape}")
+
+        expected_ncoords = sum(block_sizes)
+        if eq_monomials.shape[1] != expected_ncoords:
+            raise ValueError(
+                f"Equation {eq_idx} has {eq_monomials.shape[1]} coords, expected {expected_ncoords}"
+            )
+
+        monomial_multidegrees = []
+        for mono in eq_monomials:
+            degs = []
+            start = 0
+            for bs in block_sizes:
+                degs.append(int(np.sum(mono[start:start+bs])))
+                start += bs
+            monomial_multidegrees.append(degs)
+
+        first = monomial_multidegrees[0]
+        for d in monomial_multidegrees[1:]:
+            if d != first:
+                raise ValueError(
+                    f"Equation {eq_idx} is not homogeneous in ambient blocks.\n"
+                    f"Found multidegrees: {monomial_multidegrees}"
+                )
+
+        config.append(first)
+
+    return ambient, config
+
 def euler_cicy(dims, multidegrees, check_cy=False):
     """
     Compute the Euler characteristic of a complete intersection in a product of projective spaces.
