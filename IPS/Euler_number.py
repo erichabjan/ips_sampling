@@ -8,9 +8,12 @@ import json
 import argparse
 from pathlib import Path
 import sys
+from typing import Optional, Union, List
 rep_path = '/home/habjan.e/CY_metric/ips_sampling'
 sys.path.append(rep_path)
 import python_functions as pf
+
+from cymetric.pointgen.pointgen_cicy import CICYPointGenerator
 
 def parse_args():
     p = argparse.ArgumentParser(description="Pack Mathematica IPS outputs into cymetric-compatible dataset.npz + basis.pickle")
@@ -44,6 +47,17 @@ for key in data:
     new_data[key] = data[key]
 data = new_data
 
+### Import eliminated indices
+
+extras = np.load(os.path.join(dirname, 'mathematica_extras.npz'))
+
+j_elim = extras['j_elim_global_python_0idx']
+
+j_elim = np.asarray(j_elim, dtype=np.int64)
+
+if j_elim.ndim == 1:
+    j_elim = j_elim[:, None]
+
 ### Import Kappas
 
 kappas = pd.read_csv(os.path.join(dirname, f"kappas_{num_regs}.csv"), header=None).values.flatten()
@@ -66,27 +80,24 @@ if is_shuffled and len(kappas) > 1:
 
 ### Import meta data for CICY
 
-with open(os.path.join(dirname, f'metadata_{num_regs}.json'), "r") as f:
+with open(os.path.join(dirname, 'metadata_1.json'), "r") as f:
     metadata = json.load(f)
 
-monomials = [np.array(eq, dtype=np.int64) for eq in metadata["exponents"]]
+monomials = np.array(metadata["exponents"][0], dtype=np.int64)
 
-coefficients = []
-for eq_coeffs in metadata["coefficients_realimag"]:
-    coeff_arr = np.array(
-        [complex(c["re"], c["im"]) for c in eq_coeffs],
-        dtype=np.complex128
-    )
-    coefficients.append(coeff_arr)
+coeffs_eq0 = metadata["coefficients_realimag"][0]
+coefficients = np.array(
+    [complex(c["re"], c["im"]) for c in coeffs_eq0],
+    dtype=np.complex128
+)
 
 ambient = np.array(metadata["ambient"], dtype=np.int64)
 
 n_fold = int(metadata["dim_cy"])
 
-if "vol_moduli" in metadata:
-    kmoduli = np.array(metadata["vol_moduli"], dtype=np.float64)
-else:
-    kmoduli = np.ones(len(ambient), dtype=np.float64)
+kmoduli = np.array(metadata["kahler_moduli"], dtype=np.float64)
+
+num_regs = metadata['num_regions_requested']
 
 ### Build alpha
 
@@ -95,7 +106,7 @@ alpha = [1.0] * ncoords_ambient
 
 ### Moduli volume 
 
-mod_vol = metadata.get("target_volume", None)
+mod_vol = pf.cy_volume_from_intersections(dirname, num_regions=num_regs)
 
 # Compute Euler Characteristic
 
@@ -110,7 +121,7 @@ riemann_path = Path(dirname) / f"riemann_mypts_{num_regs}.pickle"
 if riemann_path.is_file():
     riemann_path.unlink()
 
-riemann_tensor = pf.compute_riemann(riemann_path, pts, comp_model, batch_size=512)
+riemann_tensor = pf.compute_riemann(riemann_path, pts, comp_model, j_elim=j_elim, batch_size=512)
 
 ### Chern classes
 

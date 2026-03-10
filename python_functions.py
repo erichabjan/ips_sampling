@@ -11,9 +11,13 @@ from sympy import LeviCivita
 from tqdm import tqdm
 import tensorflow as tf
 import sympy as sp
+from typing import List, Optional, Union
+from pathlib import Path
+import json
 
 from cymetric.models.models import PhiFSModel
 from cymetric.models.helper import prepare_basis as prepare_tf_basis
+from cymetric.pointgen.pointgen_cicy import CICYPointGenerator
 
 def weierstrass_uniform(Z, weierstrass_coeff):
     
@@ -335,79 +339,155 @@ class SpectralFSModelComp(SpectralFSModel):
     def call(self, input_tensor, training=True, j_elim=None):
         return self.fubini_study_pb(input_tensor, j_elim=j_elim)
 
-def christoffel(g_model, pts):
+def _reconstruct_coefficients_from_metadata(metadata: dict) -> List[np.ndarray]:
+    coeffs = []
+    for eq_coeffs in metadata["coefficients_realimag"]:
+        c = np.array([complex(x["re"], x["im"]) for x in eq_coeffs], dtype=np.complex128)
+        coeffs.append(c)
+    return coeffs
+
+
+def _ensure_int_array_nested(x) -> List[np.ndarray]:
+    # metadata["exponents"] is nested: [eq][monomial][coord]
+    return [np.array(eq, dtype=np.int64) for eq in x]
+
+
+def cy_volume_from_intersections(
+    input_dir: Union[str, Path],
+    num_regions: int = 1,
+    kahler_moduli: Optional[np.ndarray] = None,
+    metadata_filename: Optional[str] = None,
+) -> float:
+    """
+    Compute the Kähler volume Vol_K = d_{ijk} t_i t_j t_k for a CICY 3-fold,
+    using intersection numbers computed by cymetric from the geometry saved
+    in metadata_{num_regions}.json.
+
+    Returns the intersection-number volume in cymetric's convention.
+    """
+    input_dir = Path(input_dir)
+    if metadata_filename is None:
+        metadata_filename = f"metadata_{num_regions}.json"
+    meta_path = input_dir / metadata_filename
+
+    with open(meta_path, "r") as f:
+        metadata = json.load(f)
+
+    # Geometry
+    ambient = np.array(metadata.get("ambient", metadata["dimPs"]), dtype=np.int64)
+    monomials = _ensure_int_array_nested(metadata["exponents"])
+    coefficients = _reconstruct_coefficients_from_metadata(metadata)
+
+    # Kähler moduli
+    if kahler_moduli is None:
+        if "kahler_moduli" in metadata:
+            kahler_moduli = np.array(metadata["kahler_moduli"], dtype=np.float64)
+        else:
+            kahler_moduli = np.ones(len(ambient), dtype=np.float64)
+    else:
+        kahler_moduli = np.array(kahler_moduli, dtype=np.float64)
+
+    if kahler_moduli.shape != (len(ambient),):
+        raise ValueError(
+            "kahler_moduli must have shape ({},), got {}".format(len(ambient), kahler_moduli.shape)
+        )
+
+    # Instantiate point generator (we only need intersection tensor)
+    pg = CICYPointGenerator(monomials, coefficients, kahler_moduli, ambient)
+
+    nfold = int(pg.nfold)
+    if nfold != 3:
+        raise ValueError("This function is for CY 3-folds; got nfold={}".format(nfold))
+
+    d = pg.intersection_tensor  # shape (h11,h11,h11)
+    vol = float(np.einsum("ijk,i,j,k->", d, kahler_moduli, kahler_moduli, kahler_moduli))
+    return vol
+
+def christoffel(g_model, pts, j_elim=None):
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(pts)
-        g = g_model(pts)
+        g = g_model(pts, j_elim=j_elim)
         g_re, g_im = tf.math.real(g), tf.math.imag(g)
     d_g_re = tape.batch_jacobian(g_re, pts, experimental_use_pfor=False)
+
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(pts)
-        g = g_model(pts)
+        g = g_model(pts, j_elim=j_elim)
         g_im = tf.math.imag(g)
     d_g_im = tape.batch_jacobian(g_im, pts, experimental_use_pfor=False)
-    dx_g_re, dy_g_re, dx_g_im, dy_g_im = d_g_re[:,:,:,:g_model.ncoords], d_g_re[:,:,:,g_model.ncoords:], d_g_im[:,:,:,:g_model.ncoords], d_g_im[:,:,:,g_model.ncoords:]
+
+    dx_g_re, dy_g_re = d_g_re[:,:,:,:g_model.ncoords], d_g_re[:,:,:,g_model.ncoords:]
+    dx_g_im, dy_g_im = d_g_im[:,:,:,:g_model.ncoords], d_g_im[:,:,:,g_model.ncoords:]
     d_g = tf.complex(dx_g_re + dy_g_im, -dy_g_re + dx_g_im)
-    pbs = g_model.pullbacks(pts)
+
+    pbs = g_model.pullbacks(pts, j_elim=j_elim)
     d_g_pb = tf.einsum('xbn,xcdn->xbcd', pbs, d_g)
     gamma = tf.einsum('xbcd, xda->xabc', d_g_pb, tf.linalg.inv(g))
     return gamma
 
-def riemann(g_model, pts):  # return R^a_{b\bar c d}
+def riemann(g_model, pts, j_elim=None):
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(pts)
-        gamma = christoffel(g_model, pts)
+        gamma = christoffel(g_model, pts, j_elim=j_elim)
         gamma_re = tf.math.real(gamma)
     d_gamma_re = tape.batch_jacobian(gamma_re, pts, experimental_use_pfor=False)
+
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(pts)
-        gamma = christoffel(g_model, pts)
-        gamma_im =tf.math.imag(gamma)
+        gamma = christoffel(g_model, pts, j_elim=j_elim)
+        gamma_im = tf.math.imag(gamma)
     d_gamma_im = tape.batch_jacobian(gamma_im, pts, experimental_use_pfor=False)
-    dx_gamma_re, dy_gamma_re, dx_gamma_im, dy_gamma_im = d_gamma_re[:,:,:,:,:g_model.ncoords], d_gamma_re[:,:,:,:,g_model.ncoords:], d_gamma_im[:,:,:,:,:g_model.ncoords], d_gamma_im[:,:,:,:,g_model.ncoords:]
+
+    dx_gamma_re, dy_gamma_re = d_gamma_re[:,:,:,:,:g_model.ncoords], d_gamma_re[:,:,:,:,g_model.ncoords:]
+    dx_gamma_im, dy_gamma_im = d_gamma_im[:,:,:,:,:g_model.ncoords], d_gamma_im[:,:,:,:,g_model.ncoords:]
     dbarc_gamma = tf.complex(dx_gamma_re - dy_gamma_im, dy_gamma_re + dx_gamma_im)
-    pbs = g_model.pullbacks(pts)
+
+    pbs = g_model.pullbacks(pts, j_elim=j_elim)
     riem = -tf.einsum('xci,xabdi->xabcd', tf.math.conj(pbs), dbarc_gamma)
     return riem
 
 # compute Ric from \del \bar\del \log \det g
-def get_Ricci(g_model, pts):
+def get_Ricci(g_model, pts, j_elim=None):
     with tf.GradientTape(persistent=True) as tape1:
         tape1.watch(pts)
         with tf.GradientTape(persistent=True) as tape2:
             tape2.watch(pts)
-            # Need to disable training here, because batch norm and dropout mix the batches, such that batch_jacobian is no longer reliable.
-            ldg = tf.math.log(tf.linalg.det(g_model(pts)))
+            ldg = tf.math.log(tf.linalg.det(g_model(pts, j_elim=j_elim)))
         d_ldg = tape2.gradient(ldg, pts)
     dd_ldg = tape1.batch_jacobian(d_ldg, pts, experimental_use_pfor=False)
-    dx_dx_ldg, dx_dy_ldg, dy_dx_ldg, dy_dy_ldg = \
-        0.25*dd_ldg[:, :g_model.ncoords, :g_model.ncoords], \
-        0.25*dd_ldg[:, :g_model.ncoords, g_model.ncoords:], \
-        0.25*dd_ldg[:, g_model.ncoords:, :g_model.ncoords], \
-        0.25*dd_ldg[:, g_model.ncoords:, g_model.ncoords:]
+
+    dx_dx_ldg, dx_dy_ldg = 0.25*dd_ldg[:, :g_model.ncoords, :g_model.ncoords], 0.25*dd_ldg[:, :g_model.ncoords, g_model.ncoords:]
+    dy_dx_ldg, dy_dy_ldg = 0.25*dd_ldg[:, g_model.ncoords:, :g_model.ncoords], 0.25*dd_ldg[:, g_model.ncoords:, g_model.ncoords:]
     dd_ldg = tf.complex(dx_dx_ldg + dy_dy_ldg, dx_dy_ldg - dy_dx_ldg)
-    pbs = g_model.pullbacks(pts)
+
+    pbs = g_model.pullbacks(pts, j_elim=j_elim)
     dd_ldg = tf.einsum('xai,xij,xbj->xab', pbs, dd_ldg, tf.math.conj(pbs))
     return dd_ldg
 
 
 ## Definition for kappa- and variance-weighted integrations
-def compute_riemann(target_file, pts, comp_model, batch_size=10000):
+def compute_riemann(target_file, pts, comp_model, j_elim=None, batch_size=10000):
     pts = tf.cast(pts, dtype=tf.float32)
     num_batches = math.ceil(len(pts) / batch_size)
+
     if not os.path.exists(target_file):
         for i in tqdm(range(num_batches)):
-            if i == 0:
-                riem = riemann(comp_model, pts[:batch_size])
-            else:
-                riem = tf.concat([riem, riemann(comp_model, pts[i * batch_size:(i + 1) * batch_size])], axis=0)
+            s = i * batch_size
+            e = min((i + 1) * batch_size, len(pts))
+            jel = None
+            if j_elim is not None:
+                jel = tf.convert_to_tensor(j_elim[s:e], dtype=tf.int64)
+
+            chunk = riemann(comp_model, pts[s:e], j_elim=jel)
+            riem = chunk if i == 0 else tf.concat([riem, chunk], axis=0)
+
         with open(target_file, 'wb') as hnd:
             pickle.dump(riem.numpy(), hnd)
     else:
         with open(target_file, 'rb') as hnd:
             riem = pickle.load(hnd)
-    riem = tf.cast(riem, dtype=tf.complex64)
-    return riem
+
+    return tf.cast(riem, dtype=tf.complex64)
 
 def get_chern_classes(riem, comp_model):
     # first Chern class
