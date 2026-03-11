@@ -1,40 +1,37 @@
 (* Import CICY IPS sampler *)
 Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
-
 (* multi-equation CICY *)
 dimPs = {3, 3};
-coefficients = {
-  {1, 1, 1, 1},
-  {1, 1, 1, 1},
-  {1, 1, 1, 1} 
+degreeMatrix = {
+   {3, 0},
+   {0, 3},
+   {1, 1}
 };
 
-exponents = {
-  (* Equation 1: cubic in first P^3 only, degree (3,0) *)
-  {
-    {3, 0, 0, 0,  0, 0, 0, 0},   (* x0^3 *)
-    {2, 1, 0, 0,  0, 0, 0, 0},   (* x0^2 x1 *)
-    {0, 1, 1, 1,  0, 0, 0, 0},   (* x1 x2 x3 *)
-    {0, 0, 3, 0,  0, 0, 0, 0}    (* x2^3 *)
-  },
+BlockExponents[d_, n_] := Select[Tuples[Range[0, d], n], Total[#] == d &];
 
-  (* Equation 2: cubic in second P^3 only, degree (0,3) *)
-  {
-    {0, 0, 0, 0,  3, 0, 0, 0},   (* y0^3 *)
-    {0, 0, 0, 0,  2, 1, 0, 0},   (* y0^2 y1 *)
-    {0, 0, 0, 0,  0, 1, 1, 1},   (* y1 y2 y3 *)
-    {0, 0, 0, 0,  0, 0, 0, 3}    (* y3^3 *)
-  },
+EquationExponents[degRow_, dimPs_] := Module[
+   {blocks},
+   blocks = Table[
+      BlockExponents[degRow[[i]], dimPs[[i]] + 1],
+      {i, Length[dimPs]}
+   ];
+   Flatten[
+      Outer[Join, Sequence @@ blocks, 1],
+      Length[dimPs] - 1
+   ]
+];
+exponents = EquationExponents[#, dimPs] & /@ degreeMatrix;
 
-  (* Equation 3: bilinear, degree (1,1) *)
-  {
-    {1, 0, 0, 0,  1, 0, 0, 0},   (* x0 y0 *)
-    {0, 1, 0, 0,  0, 1, 0, 0},   (* x1 y1 *)
-    {0, 0, 1, 0,  0, 0, 1, 0},   (* x2 y2 *)
-    {0, 0, 0, 1,  0, 0, 0, 1}    (* x3 y3 *)
-  }
-};
+SeedRandom[1234];
+coefficients = Table[
+   N[RandomReal[{-1, 1}, Length[exponents[[i]]]], 20],
+   {i, Length[exponents]}
+];
+
+kahlerModuli = ConstantArray[1.0, Length[dimPs]];
+targetVolume = Automatic;
 
 precisionVal = 20;
 verboseVal = 1;
@@ -82,6 +79,7 @@ If[!DirectoryQ[dir],
     dimPs,
     coefficients,
     exponents,
+    kahlerModuli,
     precisionVal,
     verboseVal,
     frontEndVal
@@ -106,6 +104,7 @@ FlattenPoint[pt_] := Join @@ pt;
 
 (* Convert coefficients to JSON-safe {re,im} objects *)
 ComplexToAssoc[z_] := <|"re" -> N[Re[z], 20], "im" -> N[Im[z], 20]|>;
+TargetVolumeForJSON[val_] := If[val === Automatic, Null, N[val, 20]];
 
 (* Boolean mask for valid points *)
 validMask = NumericPointQ /@ pointCoords;
@@ -213,12 +212,15 @@ If[Count[validMask, True] == 0,
     ],
 
     (* Physical / numerical conventions *)
+    "kahler_moduli" -> N[kahlerModuli, 20],
+    "target_volume" -> TargetVolumeForJSON[targetVolume],
     "omega_quantity" -> "|Omega|^2",
     "omega_description" -> "Mathematica omegas CSV stores abs(Omega wedge Omegabar) = |Omega|^2 (real, nonnegative).",
     "weights_quantity" -> "kappa * (|Omega|^2 / top_form_det) with IPS normalization as returned by SamplePointsIPS",
     "patches_local_convention" -> "1-indexed patch index within each projective block (Mathematica indexing)",
     "patches_global_convention" -> "1-indexed flattened global coordinate indices (Mathematica indexing)",
     "j_elim_global_convention" -> "1-indexed flattened global eliminated coordinate indices (Mathematica indexing)",
+    "target_volume_description" -> "Optional normalization target for downstream integrations (e.g. Euler characteristic estimation). Null means not specified at sampling/export time.",
 
     (* File manifest *)
     "files" -> <|

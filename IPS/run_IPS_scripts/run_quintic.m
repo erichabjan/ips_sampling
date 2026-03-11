@@ -3,9 +3,13 @@ Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.
 
 (* Qunitic Inputs *)
 dimPs = {4};
-coefficients = {{1.0, 1.0, 1.0, 1.0, 1.0, -5.0}};
-exponents = {{{5,0,0,0,0}, {0,5,0,0,0}, {0,0,5,0,0}, 
-              {0,0,0,5,0}, {0,0,0,0,5}, {1,1,1,1,1}}};
+
+exponents = {
+  Select[Tuples[Range[0, 5], 5], Total[#] == 5 &]
+};
+
+SeedRandom[1234];
+coefficients = {N[RandomReal[{-2, 2}, Length[exponents[[1]]]], 20]};
 
 kahlerModuli = ConstantArray[1.0, Length[dimPs]];
 targetVolume = Automatic;

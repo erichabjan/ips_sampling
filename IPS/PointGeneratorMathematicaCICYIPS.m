@@ -139,38 +139,52 @@ FSAmbientMetric[ptFlat_List, dimPs_List, voljs_List] := Module[
 PullbackMetric[Jpb_, gAmb_] := Transpose[Jpb].gAmb.Conjugate[Jpb];
 
 LeviCivitaWedgeDet[gpbs_List] := Module[
-  {n, lcL, lcR, tp, pairs, res},
+  {n, perms, signs},
 
-  (* ensure we really have a plain list of matrices *)
   If[!VectorQ[gpbs, MatrixQ], Return[Indeterminate]];
-
   n = Length[gpbs];
-  n = Round[n]; (* force exact integer *)
-
   If[n < 1, Return[Indeterminate]];
 
-  lcL = Normal @ LeviCivitaTensor[n];
-  lcR = Normal @ LeviCivitaTensor[n];
-
-  tp  = TensorProduct @@ Join[gpbs, {lcL, lcR}];
-
-  pairs = Join[
-    Table[{2 k - 1, 2 n + k}, {k, 1, n}],
-    Table[{2 k,     3 n + k}, {k, 1, n}]
+  (* Fast path for CY1 / torus *)
+  If[n == 1 && Dimensions[gpbs[[1]]] == {1, 1},
+    Return @ N[gpbs[[1, 1, 1]]];
   ];
 
-  (* force integer contraction spec *)
-  pairs = pairs /. x_Real :> Round[x];
+  (* Fast path for CY3 *)
+  If[n == 3 && And @@ (Dimensions[#] == {3, 3} & /@ gpbs),
+    perms = Permutations[Range[3]];
+    signs = Signature /@ perms;
+    Return @ N @ Sum[
+      signs[[a]] signs[[b]]
+      gpbs[[1, perms[[a, 1]], perms[[b, 1]]]]
+      gpbs[[2, perms[[a, 2]], perms[[b, 2]]]]
+      gpbs[[3, perms[[a, 3]], perms[[b, 3]]]],
+      {a, 6}, {b, 6}
+    ];
+  ];
 
-  res = Quiet[Check[TensorContract[tp, pairs], Indeterminate], TensorContract::contr];
+  (* Fallback: fully general version *)
+  Module[{lcL, lcR, tp, pairs, res},
+    lcL = Normal @ LeviCivitaTensor[n];
+    lcR = Normal @ LeviCivitaTensor[n];
 
-  If[res === Indeterminate, Return[Indeterminate]];
+    tp = TensorProduct @@ Join[gpbs, {lcL, lcR}];
 
-  (* unwrap rank-0 tensor / sparse scalar *)
-  res = If[Head[res] === SparseArray, Normal[res], res];
-  res = If[ArrayQ[res], First@Flatten[res], res];
+    pairs = Join[
+      Table[{2 k - 1, 2 n + k}, {k, 1, n}],
+      Table[{2 k, 3 n + k}, {k, 1, n}]
+    ];
 
-  N @ res
+    res = Quiet[
+      Check[TensorContract[tp, pairs], Indeterminate],
+      TensorContract::contr
+    ];
+
+    If[res === Indeterminate, Return[Indeterminate]];
+    res = If[Head[res] === SparseArray, Normal[res], res];
+    res = If[ArrayQ[res], First@Flatten[res], res];
+    N @ res
+  ]
 ];
 
 (* Patch Normalization Function *)
@@ -191,154 +205,118 @@ getWeightOmegas[
   g_, eqns_, beqns_, pt_, bpt_, patchLocal_, numParamsInPn_, \[Kappa]_: 1
 ] := Module[
   {
-    patchGlobal, substCoords, substbCoords,
-    numEqns, dimCY,
-    ptNorm,
-    \[Omega]ambient,
-    jElimGlobal, goodCoordsIndexSet,
-    Bmat, Amat, dZ,
-    Jpb,
-    omegaMat, Omega, OmegaOmegaBar,
-    allOmegas, ts, fsPbs, detgNorm, w
+    nCoords, numEqns, dimCY,
+    patchGlobal, ptNorm, rules,
+    jElimGlobal, goodMask, goodCoordsIndexSet,
+    jacEvals, Bmat, Amat, detB, dZ, Jpb,
+    OmegaOmegaBar, allOmegas, ts, fsPbs, detgNorm, w
   },
-  (
-    numEqns = Length[eqns];
-    dimCY = Total[dimPs] - numEqns;
 
-    (* patch globals (1-indexed flattened) *)
-    patchGlobal = patchGlobalsFromLocal[patchLocal, dimPs];
+  nCoords = Length[varsFlat];
+  numEqns = Length[eqns];
+  dimCY   = Total[dimPs] - numEqns;
 
-    ptNorm = patchNormalizeFlatPoint[pt, dimPs];
-    If[!VectorQ[ptNorm, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+  (* ---------- memoized symbolic Jacobian of eqns ---------- *)
+  If[!ValueQ[getWeightOmegas`jacEqns],
+    getWeightOmegas`jacEqns = D[eqns, {varsFlat}];
+  ];
 
-    (* Substitution rules (normalized patch coordinates) *)
-    substCoords  = substRulesBlockwise[varsUnflat, ptNorm,  dimPs, patchLocal];
-    substbCoords = substRulesBlockwiseBar[bvarsUnflat, Conjugate[ptNorm], dimPs, patchLocal];
+  patchGlobal = patchGlobalsFromLocal[patchLocal, dimPs];
 
-    (* Evaluate ambient metric at point (same as cymetric FS convention if getFS matches) *)
-    \[Omega]ambient = g /. substCoords /. substbCoords;
+  ptNorm = patchNormalizeFlatPoint[pt, dimPs];
+  If[!VectorQ[ptNorm, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
 
-    (* ---- cymetric: choose eliminated coords by max |dQ/dz| ---- *)
-    jElimGlobal = chooseElimByMaxDQ[eqns, varsFlat, ptNorm, patchGlobal];
+  rules = Thread[varsFlat -> ptNorm];
 
-    (* good coords = all except patch and eliminated *)
-    goodCoordsIndexSet = Complement[Range[Length[varsFlat]], Join[patchGlobal, jElimGlobal]];
+  (* Evaluate full Jacobian once *)
+  jacEvals = getWeightOmegas`jacEqns /. rules;
 
-    omegaMat = Table[
-        D[eqns[[i]], varsFlat[[ jElimGlobal[[j]] ]]] /. Thread[varsFlat -> ptNorm],
-        {i, numEqns}, {j, numEqns}
+  If[!MatrixQ[jacEvals, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  (* choose eliminated coords using already-evaluated Jacobian if desired *)
+  jElimGlobal = Module[{available, elim = {}, i, scores, j},
+    available = ConstantArray[True, nCoords];
+    available[[patchGlobal]] = False;
+    available = available && Thread[Chop[ptNorm - 1] =!= 0];
+
+    For[i = 1, i <= numEqns, i++,
+      scores = Abs[jacEvals[[i]]] * Boole[available];
+      j = First @ Ordering[scores, -1];
+      AppendTo[elim, j];
+      available[[j]] = False;
     ];
+    elim
+  ];
 
-    Bmat = omegaMat;
+  (* good coords = all except patch and eliminated *)
+  goodMask = ConstantArray[True, nCoords];
+  goodMask[[Join[patchGlobal, jElimGlobal]]] = False;
+  goodCoordsIndexSet = Pick[Range[nCoords], goodMask];
 
-    Amat = Table[
-        D[eqns[[i]], varsFlat[[ goodCoordsIndexSet[[\[Mu]]] ]]] /. Thread[varsFlat -> ptNorm],
-        {i, numEqns}, {\[Mu], Length[goodCoordsIndexSet]}
+  Bmat = jacEvals[[All, jElimGlobal]];
+  Amat = jacEvals[[All, goodCoordsIndexSet]];
+
+  If[!MatrixQ[Bmat, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  detB = Det[Bmat];
+  If[!NumericQ[detB] || Abs[detB] < 10^-30,
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
+
+  dZ = -LinearSolve[Bmat, Amat];
+
+  (* Build pullback Jacobian *)
+  Jpb = ConstantArray[0., {nCoords, Length[goodCoordsIndexSet]}];
+  Do[
+    Jpb[[goodCoordsIndexSet[[μ]], μ]] = 1.,
+    {μ, Length[goodCoordsIndexSet]}
+  ];
+  Do[
+    Jpb[[jElimGlobal[[i]], μ]] = dZ[[i, μ]],
+    {i, numEqns}, {μ, Length[goodCoordsIndexSet]}
+  ];
+
+  OmegaOmegaBar = Abs[1/detB]^2;
+
+  allOmegas = dimPs - numParamsInPn;
+  If[Total[allOmegas] =!= Length[goodCoordsIndexSet],
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
+
+  If[!ValueQ[getWeightOmegas`tsCache[dimPs, numParamsInPn]],
+    getWeightOmegas`tsCache[dimPs, numParamsInPn] =
+        Flatten[
+        Table[
+            ConstantArray[UnitVector[Length[dimPs], i], (dimPs - numParamsInPn)[[i]]],
+            {i, Length[dimPs]}
+        ],
+        1
+        ];
     ];
+  ts = getWeightOmegas`tsCache[dimPs, numParamsInPn];
 
-    If[!MatrixQ[Bmat, NumericQ] || Abs[Det[Bmat]] < 10^-30,
+  fsPbs = Table[
+    With[{gAmbT = FSAmbientMetric[ptNorm, dimPs, ts[[k]]]},
+      If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {nCoords, nCoords},
         Return[{Indeterminate, Indeterminate, {}}]
-    ];
+      ];
+      Quiet[Check[Transpose[Jpb].gAmbT.Conjugate[Jpb], Indeterminate], Dot::rect]
+    ],
+    {k, Length[ts]}
+  ];
 
-    dZ = -LinearSolve[Bmat, Amat];  (* (numEqns) x dimCY *)
+  If[!VectorQ[fsPbs, MatrixQ], Return[{Indeterminate, Indeterminate, {}}]];
 
-    (* Build pullback Jacobian Jpb: (ncoords) x (dimCY) *)
-    Jpb = ConstantArray[0, {Length[varsFlat], Length[goodCoordsIndexSet]}];
+  detgNorm = Chop[LeviCivitaWedgeDet[fsPbs], 10^-30];
 
-    Do[
-        Jpb[[ goodCoordsIndexSet[[\[Mu]]], \[Mu] ]] = 1,
-        {\[Mu], Length[goodCoordsIndexSet]}
-    ];
+  If[!NumericQ[detgNorm] || Abs[detgNorm] < 10^-30,
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
 
-    Do[
-        Jpb[[ jElimGlobal[[i]], \[Mu] ]] = dZ[[i, \[Mu]]],
-        {i, numEqns}, {\[Mu], Length[goodCoordsIndexSet]}
-    ];
+  w = Re[OmegaOmegaBar/detgNorm];
 
-    (* ---- cymetric: Omega = 1/det(B) ---- *)
-    Module[{detOm},
-        detOm = Det[omegaMat];
-        If[!NumericQ[detOm] || Abs[detOm] < 10^-30,
-            Return[{Indeterminate, Indeterminate, {}}]
-        ];
-    Omega = 1/detOm;
-    ];
-
-    OmegaOmegaBar = Abs[Omega]^2;
-
-    allOmegas = dimPs - numParamsInPn;
-    If[Total[allOmegas] =!= Length[goodCoordsIndexSet],
-      Return[{Indeterminate, Indeterminate, {}}]
-    ];
-
-    (* Build ts rows: repeat e_i exactly allOmegas[[i]] times *)
-    ts = Flatten[
-      Table[
-        ConstantArray[UnitVector[Length[dimPs], i], allOmegas[[i]]],
-        {i, 1, Length[dimPs]}
-      ],
-      1
-    ];
-
-    (* Pull back each selector-metric *)
-    fsPbs = Table[
-      Module[{gAmbT, gPbT},
-        gAmbT = FSAmbientMetric[ptNorm, dimPs, ts[[k]]];
-        If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {Length[varsFlat], Length[varsFlat]},
-            Print["BAD gAmbT: Head=", Head[gAmbT], " dims=", Dimensions[gAmbT]];
-            Return[{Indeterminate, Indeterminate, {}}];
-        ];
-
-        If[!MatrixQ[Jpb],
-            Print["BAD Jpb: Head=", Head[Jpb], " dims=", Dimensions[Jpb]];
-            Return[{Indeterminate, Indeterminate, {}}];
-        ];
-
-        gPbT = Quiet[Check[PullbackMetric[Jpb, gAmbT], Indeterminate], Dot::rect];
-
-        If[gPbT === Indeterminate || !MatrixQ[gPbT],
-            Print["BAD gPbT: Head=", Head[gPbT], " dims=", Dimensions[gPbT]];
-            Return[{Indeterminate, Indeterminate, {}}];
-        ];
-
-        gPbT
-      ],
-      {k, 1, Length[ts]}
-    ];
-
-    If[!VectorQ[fsPbs, MatrixQ],
-        Print["BAD fsPbs: Head=", Head[fsPbs], " Length=", Length[fsPbs], " FirstHead=", Head[fsPbs[[1]]]];
-    ];
-
-    detgNorm = LeviCivitaWedgeDet[fsPbs];
-
-    detgNorm = Chop[detgNorm, 10^-30];
-
-    If[!NumericQ[detgNorm] || Abs[detgNorm] < 10^-30,
-        Return[{Indeterminate, Indeterminate, {}}]
-    ];
-
-    (* cymetric weight *)
-    w = Re[OmegaOmegaBar / detgNorm];
-
-    Return[{w, OmegaOmegaBar, jElimGlobal}];
-  )
+  {w, OmegaOmegaBar, jElimGlobal}
 ];
-
-DistributeDefinitions[
-  FSBlockMetric, FSAmbientMetric, PullbackMetric, LeviCivitaWedgeDet,
-  splitByBlocks, patchGlobalsFromLocal, substRulesBlockwise, substRulesBlockwiseBar,
-  patchNormalizeFlatPoint, patchIndicesByBlock, chooseElimByMaxDQ,
-  getWeightOmegas
-];
-
-ParallelEvaluate[
-  {
-    Length[DownValues[PullbackMetric]] > 0,
-    Length[DownValues[LeviCivitaWedgeDet]] > 0
-  },
-  1
-]
 
 (* Find new Lambda matrices based on min/max weight points *)
 GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, beqns_, 
@@ -548,7 +526,7 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
 (* Sample points and compute weights *)
 SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, 
     coefficients_, exponents_, L_, numPts_, dimCY_, kahlerModuli_: Automatic, \[Kappa]In_: 1, precision_: 20] := Module[
-    {eqns, beqns, numParamsInPn, params, pointsOnSphere, pts, i, j, g, pt, patchIndex, 
+    {eqns, beqns, numParamsInPn, params, pointsOnSphere, pts, i, j, pt, patchIndex, 
     w, \[CapitalOmega], res, allPts, \[Kappa], conf, start, col, totalDeg, numPoints},
     (
     (* Reconstruct equations *)
@@ -682,9 +660,6 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
 
     Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts, ")."];
     
-    (* Compute metric *)
-    g = getFS[varsUnflat, bvarsUnflat, Table[ConjugateTranspose[L[[k]]] . L[[k]], {k, Length[L]}], kahlerModuli];
-    
     (* Compute weights *)
     allPts = ParallelTable[
         Module[{point, patchLocal},
@@ -692,7 +667,7 @@ SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
         patchLocal = patchIndicesByBlock[point, dimPs];
         {w, \[CapitalOmega], jElimGlobal} = getWeightOmegas[
             varsFlat, bvarsFlat, varsUnflat, bvarsUnflat, dimPs,
-            g, eqns, beqns, point, Conjugate[point], patchLocal,
+            None, eqns, beqns, point, Conjugate[point], patchLocal,
             numParamsInPn, \[Kappa]In
             ];
         Chop[{point, w, \[CapitalOmega], patchLocal, jElimGlobal}]

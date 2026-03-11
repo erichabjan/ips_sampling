@@ -3,17 +3,25 @@ Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.
 
 (* bicubic *)
 dimPs = {2, 2};
-coefficients = {{
-  1, 1, 1, 1, 1, 1
-}};
-exponents = {{
-  {3,0,0, 0,3,0},
-  {0,3,0, 3,0,0},
-  {2,1,0, 1,2,0},
-  {1,2,0, 2,1,0},
-  {1,0,2, 0,1,2},
-  {0,1,2, 1,0,2}
-}};
+
+SeedRandom[1234];
+
+deg3Block = Select[Tuples[Range[0, 3], 3], Total[#] == 3 &];
+
+allBicubicExponents = Flatten[
+   Table[
+      Join[deg3Block[[i]], deg3Block[[j]]],
+      {i, Length[deg3Block]},
+      {j, Length[deg3Block]}
+   ],
+   1
+];
+
+exponents = {allBicubicExponents};
+
+coefficients = {
+   N[RandomReal[{-1, 1}, Length[allBicubicExponents]], 20]
+};
 
 kahlerModuli = ConstantArray[1.0, Length[dimPs]];
 targetVolume = Automatic;

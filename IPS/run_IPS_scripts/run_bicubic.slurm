@@ -10,7 +10,7 @@ export OMP_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=""
 
 NUM_REGIONS=1
-POINT_NUM=100000
+POINT_NUM=1000
 OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/bicubic/bicubic_reg${NUM_REGIONS}/"
 
 module load mathematica/14.1.0

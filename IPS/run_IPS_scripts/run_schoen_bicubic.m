@@ -1,26 +1,38 @@
 (* Import CICY IPS sampler *)
-Get["/Users/erich/Downloads/Northeastern/IPS_home/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
+Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
 (* split bicubic *)
 dimPs = {2, 2, 1};
-coefficients = {
-  {1, 1, 1, 1},
-  {1, 1, 1, 1}
+
+degreeMatrix = {
+   {3, 0, 1},
+   {0, 3, 1}
 };
-exponents = {
-  {
-    {3,0,0, 0,0,0, 1,0},
-    {0,3,0, 0,0,0, 0,1},
-    {1,1,1, 0,0,0, 1,0},
-    {2,1,0, 0,0,0, 0,1}
-  },
-  {
-    {0,0,0, 3,0,0, 1,0},
-    {0,0,0, 0,3,0, 0,1},
-    {0,0,0, 1,1,1, 1,0},
-    {0,0,0, 2,1,0, 0,1}
-  }
-};
+
+BlockExponents[d_, n_] := Select[Tuples[Range[0, d], n], Total[#] == d &];
+
+EquationExponents[degRow_, dimPs_] := Module[
+   {blocks},
+   blocks = Table[
+      BlockExponents[degRow[[i]], dimPs[[i]] + 1],
+      {i, Length[dimPs]}
+   ];
+   Flatten[
+      Outer[Join, Sequence @@ blocks, 1],
+      Length[dimPs] - 1
+   ]
+];
+
+exponents = EquationExponents[#, dimPs] & /@ degreeMatrix;
+
+SeedRandom[1234];
+coefficients = Table[
+   N[RandomReal[{-1, 1}, Length[exponents[[i]]]], 20],
+   {i, Length[exponents]}
+];
+
+kahlerModuli = ConstantArray[1.0, Length[dimPs]];
+targetVolume = Automatic;
 
 precisionVal = 20;
 verboseVal = 1;
@@ -68,6 +80,7 @@ If[!DirectoryQ[dir],
     dimPs,
     coefficients,
     exponents,
+    kahlerModuli,
     precisionVal,
     verboseVal,
     frontEndVal
@@ -92,6 +105,7 @@ FlattenPoint[pt_] := Join @@ pt;
 
 (* Convert coefficients to JSON-safe {re,im} objects *)
 ComplexToAssoc[z_] := <|"re" -> N[Re[z], 20], "im" -> N[Im[z], 20]|>;
+TargetVolumeForJSON[val_] := If[val === Automatic, Null, N[val, 20]];
 
 (* Boolean mask for valid points *)
 validMask = NumericPointQ /@ pointCoords;
@@ -199,12 +213,15 @@ If[Count[validMask, True] == 0,
     ],
 
     (* Physical / numerical conventions *)
+    "kahler_moduli" -> N[kahlerModuli, 20],
+    "target_volume" -> TargetVolumeForJSON[targetVolume],
     "omega_quantity" -> "|Omega|^2",
     "omega_description" -> "Mathematica omegas CSV stores abs(Omega wedge Omegabar) = |Omega|^2 (real, nonnegative).",
     "weights_quantity" -> "kappa * (|Omega|^2 / top_form_det) with IPS normalization as returned by SamplePointsIPS",
     "patches_local_convention" -> "1-indexed patch index within each projective block (Mathematica indexing)",
     "patches_global_convention" -> "1-indexed flattened global coordinate indices (Mathematica indexing)",
     "j_elim_global_convention" -> "1-indexed flattened global eliminated coordinate indices (Mathematica indexing)",
+    "target_volume_description" -> "Optional normalization target for downstream integrations (e.g. Euler characteristic estimation). Null means not specified at sampling/export time.",
 
     (* File manifest *)
     "files" -> <|

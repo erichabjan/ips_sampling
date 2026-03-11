@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=quintic_sampling
-#SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_quintic_%j.log
+#SBATCH --job-name=schoen_bicubic_sampling
+#SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_schoen_bicubic_%j.log
 #SBATCH --cpus-per-task=1
 #SBATCH --time=08:00:00
 #SBATCH --mem=15G
@@ -11,10 +11,10 @@ export CUDA_VISIBLE_DEVICES=""
 
 NUM_REGIONS=1
 POINT_NUM=1000
-OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/quintic/quintic_reg${NUM_REGIONS}/"
+OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/schoen_bicubic/schoen_bicubic_reg${NUM_REGIONS}/"
 
 module load mathematica/14.1.0
-WolframKernel -script /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_quintic.m -- \
+WolframKernel -script /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_schoen_bicubic.m \
   --output-dir "${OUTPUT_DIR}" \
   --num-regions "${NUM_REGIONS}" \
   --total-points "${POINT_NUM}"
