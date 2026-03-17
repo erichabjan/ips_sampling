@@ -80,7 +80,7 @@ if is_shuffled and len(kappas) > 1:
 
 ### Import meta data for CICY
 
-with open(os.path.join(dirname, 'metadata_1.json'), "r") as f:
+with open(os.path.join(dirname, f'metadata_{num_regs}.json'), "r") as f:
     metadata = json.load(f)
 
 monomials = np.array(metadata["exponents"][0], dtype=np.int64)

@@ -120,20 +120,194 @@ chooseElimByMaxDQ[eqns_, varsFlat_, pt_, patchGlobal_] := Module[
   elim
 ];
 
-FSBlockMetric[block_List, volj_?NumericQ] := Module[
-  {z = N@block, s, outer, n},
+FSBlockMetric[block_List, volj_?NumericQ, hBlock_: Automatic] := Module[
+  {z = N@block, H, hz, s, n},
   n = Length[z];
-  s = Total[Abs[z]^2];
-  outer = Outer[Conjugate[#1] #2 &, z, z]; (* z† z outer *)
-  (* (s I - outer) / s^2 * volj / Pi *)
-  ((s IdentityMatrix[n] - outer)/s^2) * (volj/Pi)
+
+  H = Which[
+    hBlock === Automatic || hBlock === None || hBlock === {}, IdentityMatrix[n],
+    MatrixQ[hBlock, NumericQ] && Dimensions[hBlock] === {n, n}, N@hBlock,
+    True, Return[ConstantArray[Indeterminate, {n, n}]]
+  ];
+
+  hz = H . z;
+  s  = Conjugate[z] . hz;
+
+  If[!NumericQ[s] || Abs[s] < 10^-30,
+    Return[ConstantArray[Indeterminate, {n, n}]]
+  ];
+
+  ((s Transpose[H] - Outer[Conjugate[#1] #2 &, hz, hz])/s^2) * (volj/Pi)
 ];
 
-FSAmbientMetric[ptFlat_List, dimPs_List, voljs_List] := Module[
-  {blocks, mats},
+FSAmbientMetric[ptFlat_List, dimPs_List, voljs_List, hBlocks_: Automatic] := Module[
+  {blocks, mats, hh},
   blocks = splitByBlocks[ptFlat, dimPs];
-  mats   = MapThread[FSBlockMetric, {blocks, voljs}];
+
+  hh = Which[
+    hBlocks === Automatic || hBlocks === None || hBlocks === {},
+      Table[Automatic, {Length[blocks]}],
+    ListQ[hBlocks] && Length[hBlocks] == Length[blocks],
+      hBlocks,
+    True,
+      Return[$Failed]
+  ];
+
+  mats = MapThread[FSBlockMetric, {blocks, voljs, hh}];
   BlockDiagonalMatrix[mats]
+];
+
+metricBlocksFromL[L_List] := Table[
+  Chop[ConjugateTranspose[L[[k]]] . L[[k]]],
+  {k, Length[L]}
+];
+
+prepareWeightEvaluatorCICY[
+  varsFlat_, bvarsFlat_, dimPs_, eqns_, numParamsInPn_, hBlocks_: Automatic
+] := Module[
+  {hh, ts},
+  hh = Which[
+    hBlocks === Automatic || hBlocks === None || hBlocks === {},
+      Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}],
+    ListQ[hBlocks] && Length[hBlocks] == Length[dimPs],
+      hBlocks,
+    True,
+      Return[$Failed]
+  ];
+
+  ts = Flatten[
+    Table[
+      ConstantArray[UnitVector[Length[dimPs], i], (dimPs - numParamsInPn)[[i]]],
+      {i, Length[dimPs]}
+    ],
+    1
+  ];
+
+  <|
+    "dimPs" -> dimPs,
+    "nCoords" -> Length[varsFlat],
+    "varsFlat" -> varsFlat,
+    "numEqns" -> Length[eqns],
+    "numParamsInPn" -> numParamsInPn,
+    "jacEqns" -> D[eqns, {varsFlat}],
+    "ts" -> ts,
+    "hBlocks" -> hh
+  |>
+];
+
+getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
+  {
+    nCoords, numEqns, dimPs,
+    patchGlobal, ptNorm,
+    jacEvals, jElimGlobal, goodMask, goodCoordsIndexSet,
+    Bmat, Amat, detB, dZ, Jpb,
+    OmegaOmegaBar, fsPbs, detgNorm, w
+  },
+
+  nCoords = pre["nCoords"];
+  numEqns = pre["numEqns"];
+  dimPs   = pre["dimPs"];
+
+  patchGlobal = patchGlobalsFromLocal[patchLocal, dimPs];
+
+  ptNorm = patchNormalizeFlatPoint[pt, dimPs];
+  If[!VectorQ[ptNorm, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  jacEvals = pre["jacEqns"] /. Thread[pre["varsFlat"] -> ptNorm];
+
+  If[!MatrixQ[jacEvals, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  jElimGlobal = Module[{available, elim = {}, i, scores, j},
+    available = ConstantArray[True, nCoords];
+    available[[patchGlobal]] = False;
+    available = available && Thread[Chop[ptNorm - 1] =!= 0];
+
+    For[i = 1, i <= numEqns, i++,
+      scores = Abs[jacEvals[[i]]] * Boole[available];
+      j = First @ Ordering[scores, -1];
+      AppendTo[elim, j];
+      available[[j]] = False;
+    ];
+    elim
+  ];
+
+  goodMask = ConstantArray[True, nCoords];
+  goodMask[[Join[patchGlobal, jElimGlobal]]] = False;
+  goodCoordsIndexSet = Pick[Range[nCoords], goodMask];
+
+  Bmat = jacEvals[[All, jElimGlobal]];
+  Amat = jacEvals[[All, goodCoordsIndexSet]];
+
+  If[!MatrixQ[Bmat, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  detB = Det[Bmat];
+  If[!NumericQ[detB] || Abs[detB] < 10^-30,
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
+
+  dZ = -LinearSolve[Bmat, Amat];
+
+  Jpb = ConstantArray[0., {nCoords, Length[goodCoordsIndexSet]}];
+  Do[
+    Jpb[[goodCoordsIndexSet[[μ]], μ]] = 1.,
+    {μ, Length[goodCoordsIndexSet]}
+  ];
+  Do[
+    Jpb[[jElimGlobal[[i]], μ]] = dZ[[i, μ]],
+    {i, numEqns}, {μ, Length[goodCoordsIndexSet]}
+  ];
+
+  OmegaOmegaBar = Abs[1/detB]^2;
+
+  fsPbs = Table[
+    With[{gAmbT = FSAmbientMetric[ptNorm, dimPs, pre["ts"][[k]], pre["hBlocks"]]},
+      If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {nCoords, nCoords},
+        Return[{Indeterminate, Indeterminate, {}}]
+      ];
+      Quiet[Check[Transpose[Jpb].gAmbT.Conjugate[Jpb], Indeterminate], Dot::rect]
+    ],
+    {k, Length[pre["ts"]]}
+  ];
+
+  If[!VectorQ[fsPbs, MatrixQ], Return[{Indeterminate, Indeterminate, {}}]];
+
+  detgNorm = Chop[LeviCivitaWedgeDet[fsPbs], 10^-30];
+
+  If[!NumericQ[detgNorm] || Abs[detgNorm] < 10^-30,
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
+
+  w = Re[OmegaOmegaBar/detgNorm];
+
+  {w, OmegaOmegaBar, jElimGlobal}
+];
+
+selectPointsOwnedByMetricCICY[
+  pres_List, \[Kappa]s_List, pts_List, metricIndex_Integer, ownershipTol_: 10^-6
+] := Module[
+  {allScores, minScores},
+  allScores = ParallelTable[
+    Module[{pt, patchLocal, scores},
+      pt = pts[[i, 1]];
+      patchLocal = pts[[i, 4]];
+      scores = Table[
+        Module[{tmp},
+          tmp = getWeightOmegasPrepared[pres[[j]], pt, Conjugate[pt], patchLocal];
+          If[NumericQ[tmp[[1]]], Abs[\[Kappa]s[[j]] tmp[[1]] - 1], Infinity]
+        ],
+        {j, Length[pres]}
+      ];
+      scores
+    ],
+    {i, Length[pts]},
+    DistributedContexts -> Automatic
+  ];
+
+  minScores = Min /@ allScores;
+  Table[
+    allScores[[i, metricIndex]] <= minScores[[i]] + ownershipTol,
+    {i, Length[allScores]}
+  ]
 ];
 
 PullbackMetric[Jpb_, gAmb_] := Transpose[Jpb].gAmb.Conjugate[Jpb];
@@ -204,251 +378,136 @@ getWeightOmegas[
   varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
   g_, eqns_, beqns_, pt_, bpt_, patchLocal_, numParamsInPn_, \[Kappa]_: 1
 ] := Module[
-  {
-    nCoords, numEqns, dimCY,
-    patchGlobal, ptNorm, rules,
-    jElimGlobal, goodMask, goodCoordsIndexSet,
-    jacEvals, Bmat, Amat, detB, dZ, Jpb,
-    OmegaOmegaBar, allOmegas, ts, fsPbs, detgNorm, w
-  },
+  {hBlocks, pre},
 
-  nCoords = Length[varsFlat];
-  numEqns = Length[eqns];
-  dimCY   = Total[dimPs] - numEqns;
-
-  (* ---------- memoized symbolic Jacobian of eqns ---------- *)
-  If[!ValueQ[getWeightOmegas`jacEqns],
-    getWeightOmegas`jacEqns = D[eqns, {varsFlat}];
+  hBlocks = Which[
+    ListQ[g] && Length[g] == Length[dimPs] && And @@ (MatrixQ[#, NumericQ] & /@ g),
+      g,
+    True,
+      Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}]
   ];
 
-  patchGlobal = patchGlobalsFromLocal[patchLocal, dimPs];
-
-  ptNorm = patchNormalizeFlatPoint[pt, dimPs];
-  If[!VectorQ[ptNorm, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
-
-  rules = Thread[varsFlat -> ptNorm];
-
-  (* Evaluate full Jacobian once *)
-  jacEvals = getWeightOmegas`jacEqns /. rules;
-
-  If[!MatrixQ[jacEvals, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
-
-  (* choose eliminated coords using already-evaluated Jacobian if desired *)
-  jElimGlobal = Module[{available, elim = {}, i, scores, j},
-    available = ConstantArray[True, nCoords];
-    available[[patchGlobal]] = False;
-    available = available && Thread[Chop[ptNorm - 1] =!= 0];
-
-    For[i = 1, i <= numEqns, i++,
-      scores = Abs[jacEvals[[i]]] * Boole[available];
-      j = First @ Ordering[scores, -1];
-      AppendTo[elim, j];
-      available[[j]] = False;
-    ];
-    elim
+  pre = prepareWeightEvaluatorCICY[
+    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn, hBlocks
   ];
 
-  (* good coords = all except patch and eliminated *)
-  goodMask = ConstantArray[True, nCoords];
-  goodMask[[Join[patchGlobal, jElimGlobal]]] = False;
-  goodCoordsIndexSet = Pick[Range[nCoords], goodMask];
-
-  Bmat = jacEvals[[All, jElimGlobal]];
-  Amat = jacEvals[[All, goodCoordsIndexSet]];
-
-  If[!MatrixQ[Bmat, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
-
-  detB = Det[Bmat];
-  If[!NumericQ[detB] || Abs[detB] < 10^-30,
-    Return[{Indeterminate, Indeterminate, {}}]
-  ];
-
-  dZ = -LinearSolve[Bmat, Amat];
-
-  (* Build pullback Jacobian *)
-  Jpb = ConstantArray[0., {nCoords, Length[goodCoordsIndexSet]}];
-  Do[
-    Jpb[[goodCoordsIndexSet[[μ]], μ]] = 1.,
-    {μ, Length[goodCoordsIndexSet]}
-  ];
-  Do[
-    Jpb[[jElimGlobal[[i]], μ]] = dZ[[i, μ]],
-    {i, numEqns}, {μ, Length[goodCoordsIndexSet]}
-  ];
-
-  OmegaOmegaBar = Abs[1/detB]^2;
-
-  allOmegas = dimPs - numParamsInPn;
-  If[Total[allOmegas] =!= Length[goodCoordsIndexSet],
-    Return[{Indeterminate, Indeterminate, {}}]
-  ];
-
-  If[!ValueQ[getWeightOmegas`tsCache[dimPs, numParamsInPn]],
-    getWeightOmegas`tsCache[dimPs, numParamsInPn] =
-        Flatten[
-        Table[
-            ConstantArray[UnitVector[Length[dimPs], i], (dimPs - numParamsInPn)[[i]]],
-            {i, Length[dimPs]}
-        ],
-        1
-        ];
-    ];
-  ts = getWeightOmegas`tsCache[dimPs, numParamsInPn];
-
-  fsPbs = Table[
-    With[{gAmbT = FSAmbientMetric[ptNorm, dimPs, ts[[k]]]},
-      If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {nCoords, nCoords},
-        Return[{Indeterminate, Indeterminate, {}}]
-      ];
-      Quiet[Check[Transpose[Jpb].gAmbT.Conjugate[Jpb], Indeterminate], Dot::rect]
-    ],
-    {k, Length[ts]}
-  ];
-
-  If[!VectorQ[fsPbs, MatrixQ], Return[{Indeterminate, Indeterminate, {}}]];
-
-  detgNorm = Chop[LeviCivitaWedgeDet[fsPbs], 10^-30];
-
-  If[!NumericQ[detgNorm] || Abs[detgNorm] < 10^-30,
-    Return[{Indeterminate, Indeterminate, {}}]
-  ];
-
-  w = Re[OmegaOmegaBar/detgNorm];
-
-  {w, OmegaOmegaBar, jElimGlobal}
+  getWeightOmegasPrepared[pre, pt, bpt, patchLocal]
 ];
 
 (* Find new Lambda matrices based on min/max weight points *)
-GetNewLambdas[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, beqns_, 
-    pts_, Ls_, \[Kappa]s_, dimCY_, numParamsInPn_, kahlerModuli_: Automatic] := Module[
-    {gFS, allWeights, minData, maxData, minPoint, maxPoint, wMin, wMax, 
-    \[Epsilon]Min, \[Epsilon]Max, Px, \[Lambda]Min, \[Lambda]Max, \[Lambda]MinInv, \[Lambda]MaxInv, i},
-    (
+GetNewLambdas[
+  varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, beqns_,
+  pts_, Ls_, \[Kappa]s_, dimCY_, numParamsInPn_, kahlerModuli_: Automatic
+] := Module[
+  {
+    preFS, preMetrics, allWeights, minData, maxData, minPoint, maxPoint,
+    wMin, wMax, \[Epsilon]Min, \[Epsilon]Max,
+    \[Lambda]Min, \[Lambda]Max, \[Lambda]MinInv, \[Lambda]MaxInv
+  },
 
-    Print["GetNewLambdas: Starting with ", Length[pts], " points"];
-    Print["GetNewLambdas: Current number of metrics: ", Length[Ls]];
-    Print["GetNewLambdas: dimPs = ", dimPs];
-    Print["GetNewLambdas: dimCY = ", dimCY];
+  Print["GetNewLambdas: Starting with ", Length[pts], " points"];
+  Print["GetNewLambdas: Current number of metrics: ", Length[Ls]];
+  Print["GetNewLambdas: dimPs = ", dimPs];
+  Print["GetNewLambdas: dimCY = ", dimCY];
 
-    (* Precompute standard FS metric once *)
-    gFS = getFS[varsUnflat, bvarsUnflat, {}, kahlerModuli];
+  preFS = prepareWeightEvaluatorCICY[
+    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
+    Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}]
+  ];
 
-    Print["On master kernel: PullbackMetric has definitions? ", Length[DownValues[PullbackMetric]] > 0];
-    Print["On master kernel: LeviCivitaWedgeDet has definitions? ", Length[DownValues[LeviCivitaWedgeDet]] > 0];
-    
-    (* Compute all weights in parallel *)
-    allWeights = ParallelTable[
-        Module[{pt, patchLocal, wFS, omegaFS, jElimFS, wFSAux, allMetricAux},
-            pt = pts[[i, 1]];
-            patchLocal = pts[[i, 4]];
-            {wFS, omegaFS, jElimFS} = getWeightOmegas[
-                varsFlat, bvarsFlat, varsUnflat, bvarsUnflat, dimPs,
-                gFS, eqns, beqns, pt, Conjugate[pt], patchLocal,
-                numParamsInPn, \[Kappa]s[[1]]
-                ];
-            wFSAux = wFS/omegaFS;
+  preMetrics = Table[
+    prepareWeightEvaluatorCICY[
+      varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
+      metricBlocksFromL[Ls[[j]]]
+    ],
+    {j, Length[Ls]}
+  ];
 
-            (* Calculate weights for all metrics *)
-            allMetricAux = Table[
-                Module[{tmpw, tmpomega, tmpj, gFS},
-                gFS = getFS[
-                    varsUnflat, bvarsUnflat,
-                    Table[ConjugateTranspose[Ls[[j]][[k]]] . Ls[[j]][[k]], {k, Length[Ls[[j]]]}],
-                    kahlerModuli
-                    ];
-                    {tmpw, tmpomega, tmpj} = getWeightOmegas[
-                        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat, dimPs,
-                        gFS, eqns, beqns, pt, Conjugate[pt], patchLocal,
-                        numParamsInPn, \[Kappa]s[[1]]
-                        ];
-                        tmpw/tmpomega
-                        ],
-                        {j, Length[Ls]}
-                        ];
-            
-            {Min[allMetricAux], Max[allMetricAux], pt, wFSAux^(1/dimCY) - 1, i}
+  allWeights = ParallelTable[
+    Module[{pt, patchLocal, allMetricWeights, chosenWeight, epsChosen},
+      pt = pts[[i, 1]];
+      patchLocal = pts[[i, 4]];
+
+      allMetricWeights = Table[
+        Module[{tmp},
+          tmp = getWeightOmegasPrepared[preMetrics[[j]], pt, Conjugate[pt], patchLocal];
+          If[NumericQ[tmp[[1]]], \[Kappa]s[[j]] tmp[[1]], Infinity]
         ],
-        {i, Length[pts]},
-        DistributedContexts -> Automatic
-    ];
+        {j, Length[Ls]}
+      ];
 
-    Print["GetNewLambdas: Computed weights for all points"];
-    Print["GetNewLambdas: Number of valid weights: ", Count[allWeights, {_?NumericQ, _?NumericQ, __}]];
-    Print["GetNewLambdas: Sample of weights (first 3): ", Take[allWeights, Min[3, Length[allWeights]]]];
-    
-    (* Find global minimum and maximum *)
-    minData = SortBy[allWeights, #[[1]] &][[1]];
-    maxData = SortBy[allWeights, -#[[2]] &][[1]];
-    
-    (* Extract data *)
-    wMin = minData[[1]];
-    minPoint = minData[[3]];
-    \[Epsilon]Min = minData[[4]];
-    wMax = maxData[[2]];
-    maxPoint = maxData[[3]];
-    \[Epsilon]Max = maxData[[4]];
+      chosenWeight = allMetricWeights[[Ordering[Abs[allMetricWeights - 1], 1][[1]]]];
+      epsChosen = chosenWeight^(1/dimCY) - 1;
 
-    Print["GetNewLambdas: wMin = ", wMin, ", wMax = ", wMax];
-    Print["GetNewLambdas: εMin = ", εMin, ", εMax = ", εMax];
-    Print["GetNewLambdas: minPoint = ", minPoint];
-    Print["GetNewLambdas: maxPoint = ", maxPoint];
-    
-    (* Construct Lambda matrices for each projective space *)
-    \[Lambda]Min = Table[
-        Module[{minPtBlock, PxBlock},
-            minPtBlock = minPoint[[Sum[dimPs[[k]] + 1, {k, 1, i - 1}] + 1 ;; 
-                Sum[dimPs[[k]] + 1, {k, 1, i}]]];
-            PxBlock = KroneckerProduct[minPtBlock, ConjugateTranspose[minPtBlock]] / 
+      {chosenWeight, pt, epsChosen, i}
+    ],
+    {i, Length[pts]},
+    DistributedContexts -> Automatic
+  ];
+
+  Print["GetNewLambdas: Computed weights for all points"];
+  Print["GetNewLambdas: Number of valid weights: ", Count[allWeights, {_?NumericQ, __}]];
+  Print["GetNewLambdas: Sample of weights (first 3): ", Take[allWeights, Min[3, Length[allWeights]]]];
+
+  minData = SortBy[allWeights, #[[1]] &][[1]];
+  maxData = SortBy[allWeights, -#[[1]] &][[1]];
+
+  wMin = minData[[1]];
+  minPoint = minData[[2]];
+  \[Epsilon]Min = minData[[3]];
+
+  wMax = maxData[[1]];
+  maxPoint = maxData[[2]];
+  \[Epsilon]Max = maxData[[3]];
+
+  Print["GetNewLambdas: wMin = ", wMin, ", wMax = ", wMax];
+  Print["GetNewLambdas: εMin = ", \[Epsilon]Min, ", εMax = ", \[Epsilon]Max];
+  Print["GetNewLambdas: minPoint = ", minPoint];
+  Print["GetNewLambdas: maxPoint = ", maxPoint];
+
+  \[Lambda]Min = Table[
+    Module[{minPtBlock, PxBlock},
+      minPtBlock = minPoint[[Sum[dimPs[[k]] + 1, {k, 1, i - 1}] + 1 ;;
+                             Sum[dimPs[[k]] + 1, {k, 1, i}]]];
+      PxBlock = KroneckerProduct[minPtBlock, ConjugateTranspose[minPtBlock]] /
                 (ConjugateTranspose[minPtBlock] . minPtBlock);
-            1/(1 + \[Epsilon]Min) (IdentityMatrix[dimPs[[i]] + 1] + \[Epsilon]Min PxBlock)
-        ],
-        {i, Length[dimPs]}
-    ];
-    
-    \[Lambda]Max = Table[
-        Module[{maxPtBlock, PxBlock},
-            maxPtBlock = maxPoint[[Sum[dimPs[[k]] + 1, {k, 1, i - 1}] + 1 ;; 
-                Sum[dimPs[[k]] + 1, {k, 1, i}]]];
-            PxBlock = KroneckerProduct[maxPtBlock, ConjugateTranspose[maxPtBlock]] / 
+      1/(1 + \[Epsilon]Min) (IdentityMatrix[dimPs[[i]] + 1] + \[Epsilon]Min PxBlock)
+    ],
+    {i, Length[dimPs]}
+  ];
+
+  \[Lambda]Max = Table[
+    Module[{maxPtBlock, PxBlock},
+      maxPtBlock = maxPoint[[Sum[dimPs[[k]] + 1, {k, 1, i - 1}] + 1 ;;
+                             Sum[dimPs[[k]] + 1, {k, 1, i}]]];
+      PxBlock = KroneckerProduct[maxPtBlock, ConjugateTranspose[maxPtBlock]] /
                 (ConjugateTranspose[maxPtBlock] . maxPtBlock);
-            1/(1 + \[Epsilon]Max) (IdentityMatrix[dimPs[[i]] + 1] + \[Epsilon]Max PxBlock)
-        ],
-        {i, Length[dimPs]}
-    ];
+      1/(1 + \[Epsilon]Max) (IdentityMatrix[dimPs[[i]] + 1] + \[Epsilon]Max PxBlock)
+    ],
+    {i, Length[dimPs]}
+  ];
 
-    Print["GetNewLambdas: λMin matrices dimensions: ", Dimensions /@ λMin];
-    Print["GetNewLambdas: λMax matrices dimensions: ", Dimensions /@ λMax];
-    Print["GetNewLambdas: λMin[[1]] = ", λMin[[1]]];
-    Print["GetNewLambdas: λMax[[1]] = ", λMax[[1]]];
-    
-    (* Hermitianize the inverse matrices *)
-    \[Lambda]MinInv = Table[
-        Module[{inv},
-            inv = Chop[Inverse[Chop[\[Lambda]Min[[i]]]]];
-            Chop[1/2 (inv + ConjugateTranspose[inv])]
-        ],
-        {i, Length[\[Lambda]Min]}
-    ];
-    
-    \[Lambda]MaxInv = Table[
-        Module[{inv},
-            inv = Chop[Inverse[Chop[\[Lambda]Max[[i]]]]];
-            Chop[1/2 (inv + ConjugateTranspose[inv])]
-        ],
-        {i, Length[\[Lambda]Max]}
-    ];
+  \[Lambda]MinInv = Table[
+    Module[{inv},
+      inv = Chop[Inverse[Chop[\[Lambda]Min[[i]]]]];
+      Chop[1/2 (inv + ConjugateTranspose[inv])]
+    ],
+    {i, Length[\[Lambda]Min]}
+  ];
 
-    Print["GetNewLambdas: λMinInv dimensions: ", Dimensions /@ λMinInv];
-    Print["GetNewLambdas: λMaxInv dimensions: ", Dimensions /@ λMaxInv];
-    Print["GetNewLambdas: Checking if Cholesky will work..."];
-    Print["GetNewLambdas: λMinInv[[1]] numeric? ", And @@ (NumericQ /@ Flatten[λMinInv[[1]]])];
-    Print["GetNewLambdas: λMaxInv[[1]] numeric? ", And @@ (NumericQ /@ Flatten[λMaxInv[[1]]])];
-    
-    Return[{
-        Table[CholeskyDecomposition[\[Lambda]MinInv[[i]]], {i, Length[\[Lambda]MinInv]}],
-        Table[CholeskyDecomposition[\[Lambda]MaxInv[[i]]], {i, Length[\[Lambda]MaxInv]}]
-    }];
-)];
+  \[Lambda]MaxInv = Table[
+    Module[{inv},
+      inv = Chop[Inverse[Chop[\[Lambda]Max[[i]]]]];
+      Chop[1/2 (inv + ConjugateTranspose[inv])]
+    ],
+    {i, Length[\[Lambda]Max]}
+  ];
+
+  Return[{
+    Table[CholeskyDecomposition[\[Lambda]MinInv[[i]]], {i, Length[\[Lambda]MinInv]}],
+    Table[CholeskyDecomposition[\[Lambda]MaxInv[[i]]], {i, Length[\[Lambda]MaxInv]}]
+  }];
+];
 
 
 (* Sample points on CICY with given metric *)
@@ -460,23 +519,20 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
     
     (* For each projective space, compute L^{-T} and apply to sphere points *)
     transformedSphere = Table[
-        Module[{LInv, LInvTrans},
-            LInv = Inverse[L[[j]]];
-            LInvTrans = Transpose[LInv];
-            (* Apply L^{-T} to each sphere point *)
-            Table[
-                (* Normalize after transformation *)
-                Module[{transformed},
-                    transformed = Table[
-                        Sum[LInvTrans[[a, c]] pointsOnSphere[[j, b, c]], 
-                            {c, 1, Length[pointsOnSphere[[j, 1]]]}],
-                        {a, 1, Length[pointsOnSphere[[j, 1]]]}
-                    ];
-                    (* Renormalize to unit sphere *)
-                    transformed / Sqrt[Conjugate[transformed] . transformed]
-                ],
-                {b, 1, Length[pointsOnSphere[[j]]]}
-            ]
+      Module[{LInv, LInvTrans},
+          LInv = Inverse[L[[j]]];
+          LInvTrans = Transpose[LInv];
+          Table[
+              Module[{transformed},
+                  transformed = Table[
+                      Sum[LInvTrans[[a, c]] pointsOnSphere[[j, b, c]],
+                          {c, 1, Length[pointsOnSphere[[j, 1]]]}],
+                      {a, 1, Length[pointsOnSphere[[j, 1]]]}
+                  ];
+                  transformed
+              ],
+              {b, 1, Length[pointsOnSphere[[j]]]}
+          ]
         ],
         {j, 1, Length[dimPs]}
     ];
@@ -524,263 +580,411 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
 )];
 
 (* Sample points and compute weights *)
-SamplePointsIPS[varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, 
-    coefficients_, exponents_, L_, numPts_, dimCY_, kahlerModuli_: Automatic, \[Kappa]In_: 1, precision_: 20] := Module[
-    {eqns, beqns, numParamsInPn, params, pointsOnSphere, pts, i, j, pt, patchIndex, 
-    w, \[CapitalOmega], res, allPts, \[Kappa], conf, start, col, totalDeg, numPoints},
-    (
-    (* Reconstruct equations *)
-    eqns = Table[
-        Sum[coefficients[[i, j]] Times @@ (Power[varsFlat, exponents[[i, j]]]), 
-            {j, Length[coefficients[[i]]]}],
-        {i, Length[coefficients]}
-    ];
-    
-    beqns = Table[
-        Sum[Conjugate[coefficients[[i, j]]] Times @@ (Power[bvarsFlat, exponents[[i, j]]]), 
-            {j, Length[coefficients[[i]]]}],
-        {i, Length[coefficients]}
-    ];
+SamplePointsIPS[
+  varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
+  coefficients_, exponents_, L_, numPts_, dimCY_,
+  kahlerModuli_: Automatic, \[Kappa]In_: 1, precision_: 20, regionLabel_: Missing["NotSpecified"]
+] := Module[
+  {
+    eqns, beqns, numParamsInPn, params, pointsOnSphere, pts, i, j,
+    w, \[CapitalOmega], allPts, \[Kappa], conf, start, col, totalDeg, numPoints,
+    eqnTol, ptsGood, tries, maxTries, ptsBatch, residuals, mask, ptsKeep, nKeep,
+    hBlocksNative, preNative
+  },
 
-    (* Tolerance *)
-    eqnTol = 10^(-Floor[precision/2]);
+  eqns = Table[
+    Sum[coefficients[[i, j]] Times @@ (Power[varsFlat, exponents[[i, j]]]),
+      {j, Length[coefficients[[i]]]}],
+    {i, Length[coefficients]}
+  ];
 
-    (*eqnResidual[pt_List] := Module[{vals},
-    vals = (eqns /. Thread[varsFlat -> SetPrecision[pt, precision]]);
-    Max[Abs[N[vals, precision]]]
-    ];*)
+  beqns = Table[
+    Sum[Conjugate[coefficients[[i, j]]] Times @@ (Power[bvarsFlat, exponents[[i, j]]]),
+      {j, Length[coefficients[[i]]]}],
+    {i, Length[coefficients]}
+  ];
 
-    eqnResidual[pt_List] /; VectorQ[pt, NumericQ] && Length[pt] == Length[varsFlat] := Module[{vals},
+  eqnTol = 10^(-Floor[precision/2]);
+
+  eqnResidual[pt_List] /; VectorQ[pt, NumericQ] && Length[pt] == Length[varsFlat] := Module[{vals},
     vals = eqns /. Thread[varsFlat -> SetPrecision[pt, precision]];
     Max[Abs[N[vals, precision]]]
+  ];
+  eqnResidual[_] := Infinity;
+
+  conf = {};
+  For[i = 1, i <= Length[coefficients], i++,
+    start = 1;
+    col = {};
+    For[j = 1, j <= Length[dimPs], j++,
+      totalDeg = Plus @@ exponents[[i, 1, start ;; start + dimPs[[j]]]];
+      AppendTo[col, totalDeg];
+      start += dimPs[[j]] + 1;
+    ];
+    AppendTo[conf, col];
+  ];
+
+  numParamsInPn = Table[1, {i, Length[dimPs]}];
+  For[i = 1, i <= Length[eqns] - Length[dimPs], i++,
+    If[Union[numParamsInPn*conf[[i]]] === {0},
+      numParamsInPn[[Ordering[conf[[i]], 1][[1]]]]++
+    ];
+  ];
+
+  While[Length[eqns] > Plus @@ numParamsInPn,
+    For[i = 1, i <= Length[eqns], i++,
+      If[Length[eqns] == Plus @@ numParamsInPn, Break[];];
+      numParamsInPn[[Ordering[conf[[i]], 1][[1]]]]++
+    ];
+  ];
+
+  While[Length[eqns] < Plus @@ numParamsInPn,
+    For[i = 1, i <= Length[numParamsInPn], i++,
+      numParamsInPn[[i]]--;
+      If[Min[Transpose[conf . numParamsInPn]] == 0,
+        numParamsInPn[[i]]++;,
+        Break[];
+      ];
+    ];
+  ];
+
+  i = 1;
+  While[i <= Length[numParamsInPn],
+    If[numParamsInPn[[i]] > dimPs[[i]],
+      For[j = 1, j <= Length[numParamsInPn], j++,
+        If[numParamsInPn[[j]] >= dimPs[[j]],
+          Continue[];,
+          numParamsInPn[[j]]++; numParamsInPn[[i]]--; Break[];
+        ];
+      ];
+      Continue[];
+    ];
+    i++;
+  ];
+
+  hBlocksNative = metricBlocksFromL[L];
+  preNative = prepareWeightEvaluatorCICY[
+    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn, hBlocksNative
+  ];
+
+  Clear[t];
+  params = Table[Join[{1}, Array[Unique["t"] &, numParamsInPn[[j]]]], {j, Length[numParamsInPn]}];
+
+  ptsGood = {};
+  tries = 0;
+  maxTries = 200;
+  numPoints = Ceiling[numPts/5];
+
+  While[Length[ptsGood] < numPts && tries < maxTries,
+    tries++;
+
+    pointsOnSphere = ParallelTable[
+      SamplePointsOnSphere[dimPs[[i]] + 1, numPoints (numParamsInPn[[i]] + 1)],
+      {i, Length[dimPs]},
+      DistributedContexts -> Automatic
     ];
 
-    eqnResidual[_] := Infinity;
-    
-    (* Determine parameter distribution *)
-    conf = {};
-    For[i = 1, i <= Length[coefficients], i++,
-        start = 1;
-        col = {};
-        For[j = 1, j <= Length[dimPs], j++,
-            totalDeg = Plus @@ exponents[[i, 1, start ;; start + dimPs[[j]]]];
-            AppendTo[col, totalDeg];
-            start += dimPs[[j]] + 1;
-        ];
-        AppendTo[conf, col];
-    ];
-    
-    numParamsInPn = Table[1, {i, Length[dimPs]}];
-    For[i = 1, i <= Length[eqns] - Length[dimPs], i++,
-        If[Union[numParamsInPn*conf[[i]]] === {0},
-            numParamsInPn[[Ordering[conf[[i]], 1][[1]]]]++
-        ];
-    ];
-    
-    While[Length[eqns] > Plus @@ numParamsInPn,
-        For[i = 1, i <= Length[eqns], i++,
-            If[Length[eqns] == Plus @@ numParamsInPn, Break[];];
-            numParamsInPn[[Ordering[conf[[i]], 1][[1]]]]++
-        ];
-    ];
-    
-    While[Length[eqns] < Plus @@ numParamsInPn,
-        For[i = 1, i <= Length[numParamsInPn], i++,
-            numParamsInPn[[i]]--;
-            If[Min[Transpose[conf . numParamsInPn]] == 0,
-                numParamsInPn[[i]]++;,
-                Break[];
-            ];
-        ];
-    ];
-    
-    i = 1;
-    While[i <= Length[numParamsInPn],
-        If[numParamsInPn[[i]] > dimPs[[i]],
-            For[j = 1, j <= Length[numParamsInPn], j++,
-                If[numParamsInPn[[j]] >= dimPs[[j]],
-                    Continue[];,
-                    numParamsInPn[[j]]++; numParamsInPn[[i]]--; Break[];
-                ];
-            ];
-            Continue[];
-        ];
-        i++;
-    ];
-    
-    (* Generate points *)
-
-    Clear[t];
-
-    params = Table[Join[{1}, Array[Unique["t"] &, numParamsInPn[[j]]]], {j, Length[numParamsInPn]}];
-
-    ptsGood = {};
-    tries = 0;
-    maxTries = 200;
-
-    numPoints = Ceiling[numPts / 5];
-
-    While[Length[ptsGood] < numPts && tries < maxTries,
-        tries++;
-    
-        pointsOnSphere = ParallelTable[
-            SamplePointsOnSphere[dimPs[[i]] + 1, numPoints (numParamsInPn[[i]] + 1)],
-            {i, Length[dimPs]},
-            DistributedContexts -> Automatic
-        ];
-
-        (* Sample points with metric transformation *)
-        ptsBatch = ParallelTable[
-            getPointsOnCYIPS[varsUnflat, numParamsInPn, dimPs, params,
-                Table[pointsOnSphere[[i, p + (b - 1) numPoints]], 
-                    {i, Length[pointsOnSphere]}, {b, 1 + numParamsInPn[[i]]}],
-                eqns, L, precision],
-            {p, numPoints},
-            DistributedContexts -> Automatic
-        ];
-    
-        ptsBatch = Flatten[ptsBatch, 1];
-        ptsBatch = Select[ptsBatch, MatchQ[#, {_?NumericQ ..}] && Length[#] == Length[varsFlat] &];
-        Print["SamplePointsIPS: Batch ", tries, " produced ", Length[ptsBatch], " raw points."];
-
-        (* Residuals + filtering *)
-        residuals = eqnResidual /@ ptsBatch;
-        mask = Thread[residuals < eqnTol];
-
-        ptsKeep = Pick[ptsBatch, mask, True];
-        nKeep = Length[ptsKeep];
-
-        ptsGood = Join[ptsGood, ptsKeep];
-
-        Print["SamplePointsIPS: Batch ", tries, " kept ", nKeep,
-          " points (eqnTol=", eqnTol, "). Total kept = ", Length[ptsGood], "."];
-        ];
-
-    pts = ptsGood;
-
-    Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts, ")."];
-    
-    (* Compute weights *)
-    allPts = ParallelTable[
-        Module[{point, patchLocal},
-        point = pts[[i]];
-        patchLocal = patchIndicesByBlock[point, dimPs];
-        {w, \[CapitalOmega], jElimGlobal} = getWeightOmegas[
-            varsFlat, bvarsFlat, varsUnflat, bvarsUnflat, dimPs,
-            None, eqns, beqns, point, Conjugate[point], patchLocal,
-            numParamsInPn, \[Kappa]In
-            ];
-        Chop[{point, w, \[CapitalOmega], patchLocal, jElimGlobal}]
+    ptsBatch = ParallelTable[
+      getPointsOnCYIPS[
+        varsUnflat, numParamsInPn, dimPs, params,
+        Table[
+          pointsOnSphere[[i, p + (b - 1) numPoints]],
+          {i, Length[pointsOnSphere]}, {b, 1 + numParamsInPn[[i]]}
         ],
-        {i, Length[pts]},
-        DistributedContexts -> Automatic
+        eqns, L, precision
+      ],
+      {p, numPoints},
+      DistributedContexts -> Automatic
     ];
 
-    allPts = Select[
-        allPts,
-        NumericQ[#[[2]]] && NumericQ[#[[3]]] && Abs[#[[2]]] < Infinity && Abs[#[[3]]] < Infinity &
+    ptsBatch = Flatten[ptsBatch, 1];
+    ptsBatch = Select[ptsBatch, MatchQ[#, {_?NumericQ ..}] && Length[#] == Length[varsFlat] &];
+    Print["SamplePointsIPS: Batch ", tries, " produced ", Length[ptsBatch], " raw points."];
+
+    residuals = eqnResidual /@ ptsBatch;
+    mask = Thread[residuals < eqnTol];
+
+    ptsKeep = Pick[ptsBatch, mask, True];
+    nKeep = Length[ptsKeep];
+
+    ptsGood = Join[ptsGood, ptsKeep];
+
+    Print["SamplePointsIPS: Batch ", tries, " kept ", nKeep,
+      " points (eqnTol=", eqnTol, "). Total kept = ", Length[ptsGood], "."];
+  ];
+
+  pts = ptsGood;
+  Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts, ")."];
+
+  allPts = ParallelTable[
+    Module[{point, patchLocal},
+      point = pts[[i]];
+      patchLocal = patchIndicesByBlock[point, dimPs];
+      {w, \[CapitalOmega], jElimGlobal} =
+        getWeightOmegasPrepared[preNative, point, Conjugate[point], patchLocal];
+      Chop[{point, w, \[CapitalOmega], patchLocal, jElimGlobal, regionLabel}]
+    ],
+    {i, Length[pts]},
+    DistributedContexts -> Automatic
+  ];
+
+  allPts = Select[
+    allPts,
+    NumericQ[#[[2]]] && NumericQ[#[[3]]] &&
+    Abs[#[[2]]] < Infinity && Abs[#[[3]]] < Infinity &
+  ];
+
+  If[Length[allPts] == 0,
+    Print["ERROR: All weights invalid; returning empty set."];
+    Return[{{}, Indeterminate, numParamsInPn}];
+  ];
+
+  Print["SamplePointsIPS: Computed weights for ", Length[allPts], " points"];
+  Print["SamplePointsIPS: Number with valid weights: ", Count[allPts[[;;, 2]], _?NumericQ]];
+
+  \[Kappa] = \[Kappa]In;
+  If[\[Kappa] == 1,
+    \[Kappa] = 1/Mean[allPts[[;;, 2]]];
+  ];
+
+  Return[{allPts, \[Kappa], numParamsInPn}];
+];
+
+
+(* Rejection Sampling *)
+SamplePointsWithRejectionCICY[
+  varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
+  coefficients_, exponents_, Ls_, pres_, LPos_, numPts_, dimCY_, numParamsInPn_,
+  \[Kappa]s_, kahlerModuli_: Automatic, precision_: 20,
+  startPts_: {}, numSampledInitial_: 0,
+  frontEnd_: False, verbose_: 0
+] := Module[
+  {
+    newPts, pts, resampleCounter, numSampled, numAccepted,
+    numToSample, tmpPts, tmpKappa, tmpNumParams, keepMask, keptPts,
+    ownershipTol
+  },
+
+  ownershipTol = 10^-6;
+  resampleCounter = 0;
+  numSampled = 0;
+  numAccepted = 0;
+  newPts = {};
+
+  While[Length[newPts] < numPts,
+    If[startPts =!= {} && resampleCounter == 0,
+      pts = startPts;
+      numSampled = numSampledInitial;,
+      numToSample = Min[20000, Max[1000, Length[Ls] (numPts - Length[newPts])]];
+      {tmpPts, tmpKappa, tmpNumParams} = SamplePointsIPS[
+        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+        dimPs, coefficients, exponents, Ls[[LPos]],
+        numToSample, dimCY, kahlerModuli, \[Kappa]s[[LPos]], precision, LPos
+      ];
+      pts = tmpPts;
+      numSampled += Length[pts];
     ];
 
-    If[Length[allPts] == 0,
-        Print["ERROR: All weights invalid; returning empty set."];
-        Return[{{}, Indeterminate, numParamsInPn}];
+    keepMask = selectPointsOwnedByMetricCICY[pres, \[Kappa]s, pts, LPos, ownershipTol];
+    keptPts = Pick[pts, keepMask, True];
+
+    If[startPts =!= {} && resampleCounter == 0,
+      numAccepted = Length[keptPts];,
+      numAccepted += Length[keptPts];
     ];
 
-    Print["SamplePointsIPS: Computed weights for ", Length[allPts], " points"];
-    Print["SamplePointsIPS: Number with valid weights: ", Count[allPts[[;;, 2]], _?NumericQ]];
-    
-    (* Estimate kappa if not provided: use mean of (w/|Omega|^2) *)
-    \[Kappa] = \[Kappa]In;
-    If[\[Kappa] == 1,
-    Module[{aux},
-        aux = allPts[[;;, 2]]/allPts[[;;, 3]];  (* w / OmegaOmegaBar *)
-        \[Kappa] = 1/Mean[aux];
+    newPts = Join[newPts, keptPts];
+
+    PrintMsg[
+      "Region " <> ToString[LPos] <> ": kept " <> ToString[Length[newPts]] <>
+      "/" <> ToString[numPts] <> " points after rejection pass " <>
+      ToString[resampleCounter + 1] <> ".",
+      frontEnd, verbose
     ];
-    ];
-    
-    Return[{allPts, \[Kappa], numParamsInPn}];
-)];
+
+    resampleCounter++;
+  ];
+
+  PrintMsg[
+    "Region " <> ToString[LPos] <> ": acceptance = " <>
+    ToString[numAccepted] <> "/" <> ToString[numSampled] <> ".",
+    frontEnd, verbose
+  ];
+
+  Return[{newPts, numAccepted, numSampled}];
+];
 
 (* Main function for IPS on CICYs *)
-GeneratePointsMCICYIPS[TotalNumPts_, NumRegions_, dimPs_, coefficients_, exponents_, 
-    kahlerModuli_: Automatic, precision_: 20, verbose_: 0, frontEnd_: False] := Module[
-    {NumPts, varsUnflat, bvarsUnflat, varsFlat, bvarsFlat, eqns, beqns, Ls, allPts, 
-    \[Kappa], \[Kappa]s, newPts, r, i, dimCY},
-    (
-    If[!frontEnd,
-        ClientLibrary`SetInfoLogLevel[];
-    ];
-    
-    NumPts = Ceiling[TotalNumPts / NumRegions];
-    PrintMsg["Generating " <> ToString[NumPts] <> " points in each of the " <> 
-        ToString[NumRegions] <> " regions for a total of " <> ToString[TotalNumPts] <> 
-        " points.", frontEnd, verbose];
-    
-    (* Setup coordinates *)
-    varsUnflat = Table[Subscript[x, i, a], {i, Length[dimPs]}, {a, 0, dimPs[[i]]}];
-    bvarsUnflat = Table[Subscript[bx, i, a], {i, Length[dimPs]}, {a, 0, dimPs[[i]]}];
-    varsFlat = Flatten[varsUnflat];
-    bvarsFlat = Flatten[bvarsUnflat];
-    
-    (* Calculate CICY dimension *)
-    dimCY = Plus @@ dimPs - Length[coefficients];
-    
-    (* Reconstruct equations *)
-    eqns = Table[
-        Sum[coefficients[[i, j]] Times @@ (Power[varsFlat, exponents[[i, j]]]), 
-            {j, Length[coefficients[[i]]]}],
-        {i, Length[coefficients]}
-    ];
-    
-    beqns = Table[
-        Sum[Conjugate[coefficients[[i, j]]] Times @@ (Power[bvarsFlat, exponents[[i, j]]]), 
-            {j, Length[coefficients[[i]]]}],
-        {i, Length[coefficients]}
-    ];
-    
-    (* Initialize with identity metrics *)
-    Ls = {Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}]};
-    
-    PrintMsg["Configuration matrix: " <> ToString[Transpose[
-        Table[Module[{start, col, totalDeg},
-            start = 1;
-            col = {};
-            For[i = 1, i <= Length[dimPs], i++,
-                totalDeg = Plus @@ exponents[[r, 1, start ;; start + dimPs[[i]]]];
-                AppendTo[col, totalDeg];
-                start += dimPs[[i]] + 1;
-            ];
-            col
-        ], {r, Length[coefficients]}]
-    ]], frontEnd, verbose];
-    
-    (* Generate initial points with standard FS metric *)
-    PrintMsg["Processing region 1", frontEnd, verbose];
-    {allPts, \[Kappa], numParamsInPn} = SamplePointsIPS[varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-        dimPs, coefficients, exponents, Ls[[-1]], NumPts, dimCY, kahlerModuli, 1, precision];
-    \[Kappa]s = {\[Kappa]};
-    PrintMsg["Calculated \[Kappa]=" <> ToString[\[Kappa]], frontEnd, verbose];
-    
-    (* Iteratively generate new regions *)
-    For[r = 1, r <= Floor[NumRegions/2], r++,
-        Ls = Join[Ls, GetNewLambdas[varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-            dimPs, eqns, beqns, allPts, Ls, \[Kappa]s, dimCY, numParamsInPn, kahlerModuli]];
-        
-        PrintMsg["Processing region " <> ToString[2*r], frontEnd, verbose];
-        {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-            dimPs, coefficients, exponents, Ls[[-2]], NumPts, dimCY, kahlerModuli, \[Kappa], precision];
-        allPts = Join[allPts, newPts];
-        AppendTo[\[Kappa]s, \[Kappa]];
-        
-        PrintMsg["Processing region " <> ToString[2*r + 1], frontEnd, verbose];
-        {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-            dimPs, coefficients, exponents, Ls[[-1]], NumPts, dimCY, kahlerModuli, \[Kappa], precision];
-        allPts = Join[allPts, newPts];
-        AppendTo[\[Kappa]s, \[Kappa]];
-    ];
-    
-    PrintMsg["done.", frontEnd, verbose];
-    
-    Return[{allPts[[;;, 1]], allPts[[;;, 2]], allPts[[;;, 3]], allPts[[;;, 4]], allPts[[;;, 5]], \[Kappa]s, {dimCY}}];
+GeneratePointsMCICYIPS[
+  TotalNumPts_, NumRegions_, dimPs_, coefficients_, exponents_,
+  kahlerModuli_: Automatic, precision_: 20, verbose_: 0, frontEnd_: False
+] := Module[
+  {
+    NumPts, varsUnflat, bvarsUnflat, varsFlat, bvarsFlat, eqns, beqns,
+    Ls, allPts, regionPts, newPts, pres,
+    \[Kappa], \[Kappa]s, numParamsInPn, dimCY,
+    r, i, Acceptance, NumSample, Acceptances, NumSamples
+  },
 
-)];
+  If[!frontEnd, ClientLibrary`SetInfoLogLevel[]];
+
+  NumPts = Ceiling[TotalNumPts / NumRegions];
+  PrintMsg[
+    "Generating " <> ToString[NumPts] <> " points in each of the " <>
+    ToString[NumRegions] <> " regions for a total of " <> ToString[TotalNumPts] <> " points.",
+    frontEnd, verbose
+  ];
+
+  varsUnflat = Table[Subscript[x, i, a], {i, Length[dimPs]}, {a, 0, dimPs[[i]]}];
+  bvarsUnflat = Table[Subscript[bx, i, a], {i, Length[dimPs]}, {a, 0, dimPs[[i]]}];
+  varsFlat = Flatten[varsUnflat];
+  bvarsFlat = Flatten[bvarsUnflat];
+
+  dimCY = Plus @@ dimPs - Length[coefficients];
+
+  eqns = Table[
+    Sum[coefficients[[i, j]] Times @@ (Power[varsFlat, exponents[[i, j]]]),
+      {j, Length[coefficients[[i]]]}],
+    {i, Length[coefficients]}
+  ];
+
+  beqns = Table[
+    Sum[Conjugate[coefficients[[i, j]]] Times @@ (Power[bvarsFlat, exponents[[i, j]]]),
+      {j, Length[coefficients[[i]]]}],
+    {i, Length[coefficients]}
+  ];
+
+  Ls = {Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}]};
+
+  PrintMsg["Configuration matrix: " <> ToString[Transpose[
+    Table[
+      Module[{start, col, totalDeg},
+        start = 1;
+        col = {};
+        For[i = 1, i <= Length[dimPs], i++,
+          totalDeg = Plus @@ exponents[[r, 1, start ;; start + dimPs[[i]]]];
+          AppendTo[col, totalDeg];
+          start += dimPs[[i]] + 1;
+        ];
+        col
+      ],
+      {r, Length[coefficients]}
+    ]
+  ]], frontEnd, verbose];
+
+  regionPts = {};
+  Acceptances = {};
+  NumSamples = {};
+
+  PrintMsg["Processing region 1", frontEnd, verbose];
+  {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
+    varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+    dimPs, coefficients, exponents, Ls[[1]],
+    NumPts, dimCY, kahlerModuli, 1, precision, 1
+  ];
+  regionPts = {newPts};
+  \[Kappa]s = {\[Kappa]};
+  Acceptances = {Length[newPts]};
+  NumSamples = {Length[newPts]};
+  PrintMsg["Calculated \[Kappa] = " <> ToString[\[Kappa]], frontEnd, verbose];
+
+  For[r = 1, r <= Floor[NumRegions/2], r++,
+    Ls = Join[
+      Ls,
+      GetNewLambdas[
+        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+        dimPs, eqns, beqns, Flatten[regionPts, 1],
+        Ls, \[Kappa]s, dimCY, numParamsInPn, kahlerModuli
+      ]
+    ];
+
+    PrintMsg["Processing region " <> ToString[2 r], frontEnd, verbose];
+    {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
+      varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+      dimPs, coefficients, exponents, Ls[[-2]],
+      NumPts, dimCY, kahlerModuli, 1, precision, 2 r
+    ];
+    AppendTo[regionPts, newPts];
+    AppendTo[\[Kappa]s, \[Kappa]];
+    AppendTo[Acceptances, Length[newPts]];
+    AppendTo[NumSamples, Length[newPts]];
+
+    PrintMsg["Processing region " <> ToString[2 r + 1], frontEnd, verbose];
+    {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
+      varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+      dimPs, coefficients, exponents, Ls[[-1]],
+      NumPts, dimCY, kahlerModuli, 1, precision, 2 r + 1
+    ];
+    AppendTo[regionPts, newPts];
+    AppendTo[\[Kappa]s, \[Kappa]];
+    AppendTo[Acceptances, Length[newPts]];
+    AppendTo[NumSamples, Length[newPts]];
+  ];
+
+  pres = Table[
+    prepareWeightEvaluatorCICY[
+      varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
+      metricBlocksFromL[Ls[[j]]]
+    ],
+    {j, Length[Ls]}
+  ];
+
+  PrintMsg["Now revisiting all regions with full rejection sampling.", frontEnd, verbose];
+  For[r = 1, r <= Length[Ls], r++,
+    PrintMsg["Reprocessing region " <> ToString[r], frontEnd, verbose];
+
+    {newPts, Acceptance, NumSample} = SamplePointsWithRejectionCICY[
+      varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+      dimPs, coefficients, exponents,
+      Ls, pres, r, NumPts, dimCY, numParamsInPn, \[Kappa]s,
+      kahlerModuli, precision,
+      regionPts[[r]], NumSamples[[r]],
+      frontEnd, verbose
+    ];
+
+    regionPts[[r]] = newPts;
+    Acceptances[[r]] = Acceptance;
+    NumSamples[[r]] = NumSample;
+  ];
+
+  regionPts = Table[
+    Module[{nHere = Length[regionPts[[i]]], take},
+      take = Min[NumPts, nHere];
+      If[nHere <= take,
+        regionPts[[i]],
+        RandomSample[regionPts[[i]], take]
+      ]
+    ],
+    {i, Length[regionPts]}
+  ];
+
+  \[Kappa]s = Table[
+    If[Length[regionPts[[i]]] > 0,
+      1/Mean[regionPts[[i, ;;, 2]]],
+      1
+    ],
+    {i, Length[regionPts]}
+  ];
+
+  regionLabels = Flatten@Table[
+    ConstantArray[r, Length[regionPts[[r]]]],
+    {r, Length[regionPts]}
+  ];
+
+  allPts = Flatten[regionPts, 1];
+
+  PrintMsg["done.", frontEnd, verbose];
+
+  Return[{
+    allPts[[;;, 1]],
+    allPts[[;;, 2]],
+    allPts[[;;, 3]],
+    allPts[[;;, 4]],
+    allPts[[;;, 5]],
+    regionLabels,
+    \[Kappa]s,
+    Acceptances,
+    NumSamples,
+    {dimCY}
+  }];
+];

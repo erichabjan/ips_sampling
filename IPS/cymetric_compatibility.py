@@ -128,6 +128,9 @@ def main():
     patches_local_f = INPUT_DIR / f"patches_local_{NUM_REGIONS}.csv"
     patches_global_f = INPUT_DIR / f"patches_global_{NUM_REGIONS}.csv"
     j_elim_f = INPUT_DIR / f"j_elim_global_{NUM_REGIONS}.csv"
+    region_labels_f = INPUT_DIR / f"region_labels_{NUM_REGIONS}.csv"
+    acceptances_f = INPUT_DIR / f"acceptances_{NUM_REGIONS}.csv"
+    num_samples_f = INPUT_DIR / f"num_samples_{NUM_REGIONS}.csv"
 
     required = [points_real_f, points_imag_f, weights_f, omegas_f, metadata_f]
     for p in required:
@@ -168,6 +171,8 @@ def main():
         points_imag = points_imag[mask]
         weights = weights[mask]
         omegas = omegas[mask]
+        if region_labels is not None:
+            region_labels = region_labels[mask]
 
     n_pts = len(points)
     print(f"[pack] Using {n_pts} points with {n_coords} coordinates each.")
@@ -178,6 +183,20 @@ def main():
     kappas = _load_csv_1d(kappas_f).astype(np.float64) if kappas_f.exists() else None
     if kappas is not None:
         print(f"[pack] kappas: shape={kappas.shape}, values={kappas}")
+
+    region_labels = _load_csv_1d(region_labels_f).astype(np.int64) if region_labels_f.exists() else None
+    if region_labels is not None:
+        if len(region_labels) != n_pts:
+            raise ValueError(f"region_labels length {len(region_labels)} != number of points {n_pts}")
+        print(f"[pack] region_labels: shape={region_labels.shape}, unique={np.unique(region_labels)}")
+
+    acceptances = _load_csv_1d(acceptances_f).astype(np.float64) if acceptances_f.exists() else None
+    if acceptances is not None:
+        print(f"[pack] acceptances: shape={acceptances.shape}, values={acceptances}")
+
+    num_samples = _load_csv_1d(num_samples_f).astype(np.float64) if num_samples_f.exists() else None
+    if num_samples is not None:
+        print(f"[pack] num_samples: shape={num_samples.shape}, values={num_samples}")
 
     md_n = metadata.get("num_points_valid", None)
     if md_n is not None and int(md_n) != n_pts:
@@ -275,6 +294,19 @@ def main():
         extras["j_elim_global_mathematica_1idx"] = jel
         extras["j_elim_global_python_0idx"] = jel - 1
 
+    if region_labels_f.exists():
+        rlab = _load_optional_int_csv(region_labels_f).reshape(-1)
+        extras["region_labels_mathematica_1idx"] = rlab
+        extras["region_labels_python_0idx"] = rlab - 1
+
+    if acceptances_f.exists():
+        acc = _load_csv_1d(acceptances_f).astype(np.float64)
+        extras["acceptances"] = acc
+
+    if num_samples_f.exists():
+        ns = _load_csv_1d(num_samples_f).astype(np.float64)
+        extras["num_samples"] = ns
+
     if extras:
         extras_path = INPUT_DIR / "mathematica_extras.npz"
         np.savez_compressed(extras_path, **extras)
@@ -294,6 +326,9 @@ def main():
         "kappa_for_basis": float(kappa_for_basis),
         "dataset_file": "dataset.npz",
         "basis_file": "basis.pickle",
+        "has_region_labels": bool(region_labels is not None),
+        "has_acceptances": bool(acceptances is not None),
+        "has_num_samples": bool(num_samples is not None),
     }
     with open(INPUT_DIR / "pack_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
