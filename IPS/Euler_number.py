@@ -51,6 +51,9 @@ data = new_data
 
 extras = np.load(os.path.join(dirname, 'mathematica_extras.npz'))
 
+region_labels = extras["region_labels_python_0idx"]
+region_labels = np.asarray(region_labels, dtype=np.int64).reshape(-1)
+
 j_elim = extras['j_elim_global_python_0idx']
 
 j_elim = np.asarray(j_elim, dtype=np.int64)
@@ -83,7 +86,7 @@ if is_shuffled and len(kappas) > 1:
 with open(os.path.join(dirname, f'metadata_{num_regs}.json'), "r") as f:
     metadata = json.load(f)
 
-monomials = np.array(metadata["exponents"][0], dtype=np.int64)
+monomials = [np.array(eq, dtype=np.int64) for eq in metadata["exponents"]]
 
 coeffs_eq0 = metadata["coefficients_realimag"][0]
 coefficients = np.array(
@@ -133,9 +136,10 @@ chi_naive = tf.math.real(pf.integrate_native(c3_form, pts, wo, comp_model, norma
 
 ### $\chi$ for IPS wieghted by $\kappa$
 
-regional_variances = pf.analyze_regions(c3_form, pts, wo, comp_model, kappas, verbose=False)
+regional_variances = pf.analyze_regions(c3_form, pts, wo, comp_model, kappas, region_labels, verbose=False)
 
-chi_weighted = tf.math.real(pf.integrate_variance_kappa_weighted(c3_form, pts, wo, comp_model, variances=regional_variances, kappas=kappas, normalize_to_vol=mod_vol))
+chi_weighted = tf.math.real(pf.integrate_variance_kappa_weighted(c3_form, pts, wo, comp_model, 
+                            region_labels=region_labels, variances=regional_variances, kappas=kappas,normalize_to_vol=mod_vol))
 
 ### Compare with true value
 

@@ -154,6 +154,13 @@ def main():
 
     points = points_real + 1j * points_imag
 
+    jel = _load_optional_int_csv(j_elim_f) if j_elim_f.exists() else None
+    pl = _load_optional_int_csv(patches_local_f) if patches_local_f.exists() else None
+    pglo = _load_optional_int_csv(patches_global_f) if patches_global_f.exists() else None
+    rlab = _load_optional_int_csv(region_labels_f).reshape(-1) if region_labels_f.exists() else None
+    acc = _load_csv_1d(acceptances_f).astype(np.float64) if acceptances_f.exists() else None
+    ns = _load_csv_1d(num_samples_f).astype(np.float64) if num_samples_f.exists() else None
+
     finite_mask = (
         np.all(np.isfinite(points_real), axis=1)
         & np.all(np.isfinite(points_imag), axis=1)
@@ -166,13 +173,21 @@ def main():
     if not np.all(mask):
         n_bad = np.count_nonzero(~mask)
         print(f"[pack] Filtering {n_bad} invalid rows.")
+
         points = points[mask]
         points_real = points_real[mask]
         points_imag = points_imag[mask]
         weights = weights[mask]
         omegas = omegas[mask]
-        if region_labels is not None:
-            region_labels = region_labels[mask]
+
+        if jel is not None:
+            jel = jel[mask]
+        if pl is not None:
+            pl = pl[mask]
+        if pglo is not None:
+            pglo = pglo[mask]
+        if rlab is not None:
+            rlab = rlab[mask]
 
     n_pts = len(points)
     print(f"[pack] Using {n_pts} points with {n_coords} coordinates each.")
@@ -184,17 +199,17 @@ def main():
     if kappas is not None:
         print(f"[pack] kappas: shape={kappas.shape}, values={kappas}")
 
-    region_labels = _load_csv_1d(region_labels_f).astype(np.int64) if region_labels_f.exists() else None
+    region_labels = rlab
     if region_labels is not None:
         if len(region_labels) != n_pts:
             raise ValueError(f"region_labels length {len(region_labels)} != number of points {n_pts}")
         print(f"[pack] region_labels: shape={region_labels.shape}, unique={np.unique(region_labels)}")
 
-    acceptances = _load_csv_1d(acceptances_f).astype(np.float64) if acceptances_f.exists() else None
+    acceptances = acc
     if acceptances is not None:
         print(f"[pack] acceptances: shape={acceptances.shape}, values={acceptances}")
 
-    num_samples = _load_csv_1d(num_samples_f).astype(np.float64) if num_samples_f.exists() else None
+    num_samples = ns
     if num_samples is not None:
         print(f"[pack] num_samples: shape={num_samples.shape}, values={num_samples}")
 
@@ -279,32 +294,26 @@ def main():
 
     # Save optional diagnostics
     extras = {}
-    if patches_local_f.exists():
-        pl = _load_optional_int_csv(patches_local_f)
+    if pl is not None:
         extras["patches_local_mathematica_1idx"] = pl
         extras["patches_local_python_0idx"] = pl - 1
 
-    if patches_global_f.exists():
-        pglo = _load_optional_int_csv(patches_global_f)
+    if pglo is not None:
         extras["patches_global_mathematica_1idx"] = pglo
         extras["patches_global_python_0idx"] = pglo - 1
 
-    if j_elim_f.exists():
-        jel = _load_optional_int_csv(j_elim_f)
+    if jel is not None:
         extras["j_elim_global_mathematica_1idx"] = jel
         extras["j_elim_global_python_0idx"] = jel - 1
 
-    if region_labels_f.exists():
-        rlab = _load_optional_int_csv(region_labels_f).reshape(-1)
+    if rlab is not None:
         extras["region_labels_mathematica_1idx"] = rlab
         extras["region_labels_python_0idx"] = rlab - 1
 
-    if acceptances_f.exists():
-        acc = _load_csv_1d(acceptances_f).astype(np.float64)
+    if acc is not None:
         extras["acceptances"] = acc
 
-    if num_samples_f.exists():
-        ns = _load_csv_1d(num_samples_f).astype(np.float64)
+    if ns is not None:
         extras["num_samples"] = ns
 
     if extras:

@@ -13,7 +13,7 @@ export CUDA_VISIBLE_DEVICES=""
 REGION_LIST=(1 3 5 11)
 
 NUM_REGIONS=${REGION_LIST[$SLURM_ARRAY_TASK_ID]}
-POINT_NUM=1000
+POINT_NUM=20000
 OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/quintic/quintic_reg${NUM_REGIONS}/"
 
 echo "SLURM_ARRAY_TASK_ID = ${SLURM_ARRAY_TASK_ID}"

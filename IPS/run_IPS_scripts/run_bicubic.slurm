@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bicubic_sampling
-#SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_bicubic_%j.log
+#SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_bicubic_%A_%a.log
 #SBATCH --array=0-3
 #SBATCH --cpus-per-task=1
 #SBATCH --time=08:00:00
@@ -13,7 +13,7 @@ export CUDA_VISIBLE_DEVICES=""
 REGION_LIST=(1 3 5 11)
 
 NUM_REGIONS=${REGION_LIST[$SLURM_ARRAY_TASK_ID]}
-POINT_NUM=1000
+POINT_NUM=20000
 OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/bicubic/bicubic_reg${NUM_REGIONS}/"
 
 echo "SLURM_ARRAY_TASK_ID = ${SLURM_ARRAY_TASK_ID}"

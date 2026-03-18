@@ -42,7 +42,7 @@ getRequiredArg[argList_, key_] := Module[{pos},
   pos = FirstPosition[argList, key, Missing["NotFound"]];
   If[pos === Missing["NotFound"] || pos[[1]] >= Length[argList],
     Print["ERROR: Missing required argument: ", key];
-    Print["Usage: WolframKernel -script run_quintic.m --output-dir <PATH> --num-regions <INT> --total-points <INT>"];
+    Print["Usage: WolframKernel -script run_torus.m --output-dir <PATH> --num-regions <INT> --total-points <INT>"];
     Exit[1];
   ];
   argList[[pos[[1]] + 1]]
@@ -62,10 +62,10 @@ totalNumPts = toPositiveInt[getRequiredArg[args, "--total-points"], "--total-poi
 
 If[!DirectoryQ[dir],
   CreateDirectory[dir, CreateIntermediateDirectories -> True];
-  Print["[run_quintic.m] Created directory: ", dir];
+  Print["[run_torus.m] Created directory: ", dir];
 ];
 
-{points, weights, omegas, patchesLocal, jElimGlobal, kappas, {dimCY}} =
+{points, weights, omegas, patchesLocal, jElimGlobal, regionLabels, kappas, acceptances, numSamples, {dimCY}} =
   GeneratePointsMCICYIPS[
     totalNumPts,
     numRegions,
@@ -83,11 +83,16 @@ Print["Length of points: ", Length[points]];
 Print["Head of first point: ", Head[points[[1]]]];
 Print["Dimensions of first point: ", Dimensions[points[[1]]]];
 
-pointCoords = points;
-weightsData = weights;
-omegasData  = omegas;
-kappasData  = kappas;
-dimCYData   = dimCY;
+pointCoords      = points;
+weightsData      = weights;
+omegasData       = omegas;
+patchesLocalData = patchesLocal;
+jElimGlobalData  = jElimGlobal;
+regionLabelsData = regionLabels;
+kappasData       = kappas;
+acceptancesData  = acceptances;
+numSamplesData   = numSamples;
+dimCYData        = dimCY;
 
 (* Check if a point is purely numerical *)
 NumericPointQ[pt_] := And @@ (NumericQ /@ Flatten[pt]);
@@ -109,14 +114,16 @@ If[Count[validMask, True] == 0,
 
   (* No good points *)
   Print["ERROR: No valid numeric points found!"];
-  Print["First few points: ", Take[pointCoords, Min[3, Length[pointCoords]]]],
+  Print["First few points: ", Take[pointCoords, Min[3, Length[pointCoords]]]];
+  Exit[1];,
 
   (* Else: keep only valid rows *)
   pointCoordsClean    = Pick[pointCoords,    validMask];
   weightsClean        = Pick[weightsData,    validMask];
   omegasClean         = Pick[omegasData,     validMask];
-  patchesLocalClean   = Pick[patchesLocal,   validMask];
-  jElimGlobalClean    = Pick[jElimGlobal,    validMask];
+  patchesLocalClean   = Pick[patchesLocalData,  validMask];
+  jElimGlobalClean    = Pick[jElimGlobalData,   validMask];
+  regionLabelsClean   = Pick[regionLabelsData,  validMask];
 
   (* Derive patch globals from patch locals *)
   patchesGlobalClean = patchGlobalsFromLocal[#, dimPs] & /@ patchesLocalClean;
@@ -129,6 +136,9 @@ If[Count[validMask, True] == 0,
   patchesLocalNumeric     = N[patchesLocalClean,     20];
   patchesGlobalNumeric    = N[patchesGlobalClean,    20];
   jElimGlobalNumeric      = N[jElimGlobalClean,      20];
+  regionLabelsNumeric     = N[regionLabelsClean,     20];
+  acceptancesNumeric      = N[acceptancesData,       20];
+  numSamplesNumeric       = N[numSamplesData,        20];
 
   (* Flatten points if nested *)
   pointCoordsNumericFlat =
@@ -175,10 +185,19 @@ If[Count[validMask, True] == 0,
   jElimFile = StringTemplate["j_elim_global_``.csv"][numRegions];
   Export[FileNameJoin[{dir, jElimFile}], jElimGlobalNumeric];
 
+  regionLabelsFile = StringTemplate["region_labels_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, regionLabelsFile}], regionLabelsNumeric];
+
+  acceptancesFile = StringTemplate["acceptances_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, acceptancesFile}], acceptancesNumeric];
+
+  numSamplesFile = StringTemplate["num_samples_``.csv"][numRegions];
+  Export[FileNameJoin[{dir, numSamplesFile}], numSamplesNumeric];
+
   metadataFile = StringTemplate["metadata_``.json"][numRegions];
 
   metadataAssoc = <|
-    "schema_version" -> 1,
+    "schema_version" -> 2,
     "generator" -> "GeneratePointsMCICYIPS",
 
     (* Run settings *)
@@ -213,6 +232,9 @@ If[Count[validMask, True] == 0,
     "patches_local_convention" -> "1-indexed patch index within each projective block (Mathematica indexing)",
     "patches_global_convention" -> "1-indexed flattened global coordinate indices (Mathematica indexing)",
     "j_elim_global_convention" -> "1-indexed flattened global eliminated coordinate indices (Mathematica indexing)",
+    "region_labels_convention" -> "1-indexed metric/region label for each accepted point",
+    "acceptances_description" -> "Number of accepted points accumulated by rejection sampling for each region before final trimming/random subsampling",
+    "num_samples_description" -> "Total number of proposed points considered for each region during rejection sampling",
     "target_volume_description" -> "Optional normalization target for downstream integrations (e.g. Euler characteristic estimation). Null means not specified at sampling/export time.",
 
     (* File manifest *)
@@ -224,7 +246,10 @@ If[Count[validMask, True] == 0,
       "kappas_csv" -> kappasFile,
       "patches_local_csv" -> patchesLocalFile,
       "patches_global_csv" -> patchesGlobalFile,
-      "j_elim_global_csv" -> jElimFile
+      "j_elim_global_csv" -> jElimFile,
+      "region_labels_csv" -> regionLabelsFile,
+      "acceptances_csv" -> acceptancesFile,
+      "num_samples_csv" -> numSamplesFile
     |>
   |>;
 

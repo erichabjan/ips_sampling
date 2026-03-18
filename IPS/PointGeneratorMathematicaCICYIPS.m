@@ -195,13 +195,14 @@ prepareWeightEvaluatorCICY[
   |>
 ];
 
-getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
+
+preparePointGeometryCICY[pre_, pt_, patchLocal_] := Module[
   {
     nCoords, numEqns, dimPs,
     patchGlobal, ptNorm,
     jacEvals, jElimGlobal, goodMask, goodCoordsIndexSet,
     Bmat, Amat, detB, dZ, Jpb,
-    OmegaOmegaBar, fsPbs, detgNorm, w
+    OmegaOmegaBar
   },
 
   nCoords = pre["nCoords"];
@@ -211,21 +212,25 @@ getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
   patchGlobal = patchGlobalsFromLocal[patchLocal, dimPs];
 
   ptNorm = patchNormalizeFlatPoint[pt, dimPs];
-  If[!VectorQ[ptNorm, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+  If[!VectorQ[ptNorm, NumericQ],
+    Return[$Failed]
+  ];
 
   jacEvals = pre["jacEqns"] /. Thread[pre["varsFlat"] -> ptNorm];
+  If[!MatrixQ[jacEvals, NumericQ],
+    Return[$Failed]
+  ];
 
-  If[!MatrixQ[jacEvals, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
-
-  jElimGlobal = Module[{available, elim = {}, i, scores, j},
+  jElimGlobal = Module[{available, elim, i, scores, j},
     available = ConstantArray[True, nCoords];
     available[[patchGlobal]] = False;
     available = available && Thread[Chop[ptNorm - 1] =!= 0];
+    elim = ConstantArray[0, numEqns];
 
     For[i = 1, i <= numEqns, i++,
       scores = Abs[jacEvals[[i]]] * Boole[available];
       j = First @ Ordering[scores, -1];
-      AppendTo[elim, j];
+      elim[[i]] = j;
       available[[j]] = False;
     ];
     elim
@@ -238,11 +243,13 @@ getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
   Bmat = jacEvals[[All, jElimGlobal]];
   Amat = jacEvals[[All, goodCoordsIndexSet]];
 
-  If[!MatrixQ[Bmat, NumericQ], Return[{Indeterminate, Indeterminate, {}}]];
+  If[!MatrixQ[Bmat, NumericQ],
+    Return[$Failed]
+  ];
 
   detB = Det[Bmat];
   If[!NumericQ[detB] || Abs[detB] < 10^-30,
-    Return[{Indeterminate, Indeterminate, {}}]
+    Return[$Failed]
   ];
 
   dZ = -LinearSolve[Bmat, Amat];
@@ -259,9 +266,37 @@ getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
 
   OmegaOmegaBar = Abs[1/detB]^2;
 
+  <|
+    "ptRaw" -> pt,
+    "ptNorm" -> ptNorm,
+    "patchLocal" -> patchLocal,
+    "patchGlobal" -> patchGlobal,
+    "jacEvals" -> jacEvals,
+    "jElimGlobal" -> jElimGlobal,
+    "goodCoordsIndexSet" -> goodCoordsIndexSet,
+    "Bmat" -> Bmat,
+    "Amat" -> Amat,
+    "detB" -> detB,
+    "dZ" -> dZ,
+    "Jpb" -> Jpb,
+    "OmegaOmegaBar" -> OmegaOmegaBar
+  |>
+];
+
+scorePointGeometryWithMetric[pre_, geom_] := Module[
+  {ptNorm, Jpb, OmegaOmegaBar, fsPbs, detgNorm, w},
+
+  If[geom === $Failed || !AssociationQ[geom],
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
+
+  ptNorm = geom["ptNorm"];
+  Jpb = geom["Jpb"];
+  OmegaOmegaBar = geom["OmegaOmegaBar"];
+
   fsPbs = Table[
-    With[{gAmbT = FSAmbientMetric[ptNorm, dimPs, pre["ts"][[k]], pre["hBlocks"]]},
-      If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {nCoords, nCoords},
+    With[{gAmbT = FSAmbientMetric[ptNorm, pre["dimPs"], pre["ts"][[k]], pre["hBlocks"]]},
+      If[!MatrixQ[gAmbT] || Dimensions[gAmbT] =!= {pre["nCoords"], pre["nCoords"]},
         Return[{Indeterminate, Indeterminate, {}}]
       ];
       Quiet[Check[Transpose[Jpb].gAmbT.Conjugate[Jpb], Indeterminate], Dot::rect]
@@ -269,7 +304,9 @@ getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
     {k, Length[pre["ts"]]}
   ];
 
-  If[!VectorQ[fsPbs, MatrixQ], Return[{Indeterminate, Indeterminate, {}}]];
+  If[!VectorQ[fsPbs, MatrixQ],
+    Return[{Indeterminate, Indeterminate, {}}]
+  ];
 
   detgNorm = Chop[LeviCivitaWedgeDet[fsPbs], 10^-30];
 
@@ -279,34 +316,79 @@ getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
 
   w = Re[OmegaOmegaBar/detgNorm];
 
-  {w, OmegaOmegaBar, jElimGlobal}
+  {w, OmegaOmegaBar, geom["jElimGlobal"]}
 ];
 
-selectPointsOwnedByMetricCICY[
-  pres_List, \[Kappa]s_List, pts_List, metricIndex_Integer, ownershipTol_: 10^-6
-] := Module[
-  {allScores, minScores},
-  allScores = ParallelTable[
-    Module[{pt, patchLocal, scores},
-      pt = pts[[i, 1]];
+getWeightOmegasPrepared[pre_, pt_, bpt_, patchLocal_] := Module[
+  {geom},
+  geom = preparePointGeometryCICY[pre, pt, patchLocal];
+  scorePointGeometryWithMetric[pre, geom]
+];
+
+attachMetricScoresToPointsCICY[pres_List, \[Kappa]s_List, pts_List] := Module[
+  {scoredPts},
+
+  scoredPts = ParallelTable[
+    Module[
+      {
+        point, weight, omega, patchLocal, jElimGlobal, regionLabel,
+        geom, metricScores, bestMetric, minScore
+      },
+
+      point = pts[[i, 1]];
+      weight = pts[[i, 2]];
+      omega = pts[[i, 3]];
       patchLocal = pts[[i, 4]];
-      scores = Table[
+      jElimGlobal = pts[[i, 5]];
+      regionLabel = If[Length[pts[[i]]] >= 6, pts[[i, 6]], Missing["NotSpecified"]];
+
+      geom = preparePointGeometryCICY[pres[[1]], point, patchLocal];
+
+      metricScores = Table[
         Module[{tmp},
-          tmp = getWeightOmegasPrepared[pres[[j]], pt, Conjugate[pt], patchLocal];
-          If[NumericQ[tmp[[1]]], Abs[\[Kappa]s[[j]] tmp[[1]] - 1], Infinity]
+          tmp = scorePointGeometryWithMetric[pres[[j]], geom];
+          If[NumericQ[tmp[[1]]],
+            Abs[\[Kappa]s[[j]] tmp[[1]] - 1],
+            Infinity
+          ]
         ],
         {j, Length[pres]}
       ];
-      scores
+
+      minScore = Min[metricScores];
+      bestMetric = First @ Ordering[metricScores, 1];
+
+      {
+        point,
+        weight,
+        omega,
+        patchLocal,
+        jElimGlobal,
+        regionLabel,
+        geom,
+        metricScores,
+        bestMetric,
+        minScore
+      }
     ],
     {i, Length[pts]},
     DistributedContexts -> Automatic
   ];
 
-  minScores = Min /@ allScores;
+  scoredPts
+];
+
+dropCachedMetricDataCICY[ptsWithScores_List] := ptsWithScores[[All, 1 ;; 6]];
+
+selectPointsOwnedByMetricCICY[
+  ptsWithScores_List, metricIndex_Integer, ownershipTol_: 10^-6
+] := Module[
+  {allScores, minScores},
+  allScores = ptsWithScores[[All, 8]];
+  minScores = ptsWithScores[[All, 10]];
   Table[
     allScores[[i, metricIndex]] <= minScores[[i]] + ownershipTol,
-    {i, Length[allScores]}
+    {i, Length[ptsWithScores]}
   ]
 ];
 
@@ -760,9 +842,10 @@ SamplePointsWithRejectionCICY[
   frontEnd_: False, verbose_: 0
 ] := Module[
   {
-    newPts, pts, resampleCounter, numSampled, numAccepted,
+    newPts, pts, ptsScored, resampleCounter, numSampled, numAccepted,
     numToSample, tmpPts, tmpKappa, tmpNumParams, keepMask, keptPts,
-    ownershipTol
+    ownershipTol, nNeeded, estAcceptance, safetyFactor,
+    minBatch, maxBatch, acceptedThisPass
   },
 
   ownershipTol = 10^-6;
@@ -771,34 +854,55 @@ SamplePointsWithRejectionCICY[
   numAccepted = 0;
   newPts = {};
 
+  safetyFactor = 1.25;
+  minBatch = 250;
+  maxBatch = 20000;
+
   While[Length[newPts] < numPts,
+
+    nNeeded = numPts - Length[newPts];
+
     If[startPts =!= {} && resampleCounter == 0,
       pts = startPts;
       numSampled = numSampledInitial;,
-      numToSample = Min[20000, Max[1000, Length[Ls] (numPts - Length[newPts])]];
+      
+      estAcceptance = If[numSampled > 0 && numAccepted > 0,
+        N[numAccepted/numSampled],
+        1./Max[1, Length[Ls]]
+      ];
+
+      estAcceptance = Max[10^-3, estAcceptance];
+
+      numToSample = Ceiling[safetyFactor * nNeeded / estAcceptance];
+      numToSample = Max[minBatch, numToSample];
+      numToSample = Min[maxBatch, numToSample];
+
       {tmpPts, tmpKappa, tmpNumParams} = SamplePointsIPS[
         varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
         dimPs, coefficients, exponents, Ls[[LPos]],
         numToSample, dimCY, kahlerModuli, \[Kappa]s[[LPos]], precision, LPos
       ];
+
       pts = tmpPts;
       numSampled += Length[pts];
     ];
 
-    keepMask = selectPointsOwnedByMetricCICY[pres, \[Kappa]s, pts, LPos, ownershipTol];
-    keptPts = Pick[pts, keepMask, True];
+    ptsScored = attachMetricScoresToPointsCICY[pres, \[Kappa]s, pts];
 
-    If[startPts =!= {} && resampleCounter == 0,
-      numAccepted = Length[keptPts];,
-      numAccepted += Length[keptPts];
-    ];
+    keepMask = selectPointsOwnedByMetricCICY[ptsScored, LPos, ownershipTol];
+    keptPts = Pick[ptsScored, keepMask, True];
+    acceptedThisPass = Length[keptPts];
 
-    newPts = Join[newPts, keptPts];
+    numAccepted += acceptedThisPass;
+
+    newPts = Join[newPts, dropCachedMetricDataCICY[keptPts]];
 
     PrintMsg[
       "Region " <> ToString[LPos] <> ": kept " <> ToString[Length[newPts]] <>
       "/" <> ToString[numPts] <> " points after rejection pass " <>
-      ToString[resampleCounter + 1] <> ".",
+      ToString[resampleCounter + 1] <>
+      " (accepted this pass = " <> ToString[acceptedThisPass] <>
+      ", estimated acceptance ≈ " <> ToString[N[If[numSampled > 0, numAccepted/numSampled, 0], 4]] <> ").",
       frontEnd, verbose
     ];
 
@@ -823,7 +927,8 @@ GeneratePointsMCICYIPS[
     NumPts, varsUnflat, bvarsUnflat, varsFlat, bvarsFlat, eqns, beqns,
     Ls, allPts, regionPts, newPts, pres,
     \[Kappa], \[Kappa]s, numParamsInPn, dimCY,
-    r, i, Acceptance, NumSample, Acceptances, NumSamples
+    r, i, Acceptance, NumSample, Acceptances, NumSamples,
+    regionLabels, newLambdaPair, nextRegionIndex
   },
 
   If[!frontEnd, ClientLibrary`SetInfoLogLevel[]];
@@ -888,37 +993,49 @@ GeneratePointsMCICYIPS[
   NumSamples = {Length[newPts]};
   PrintMsg["Calculated \[Kappa] = " <> ToString[\[Kappa]], frontEnd, verbose];
 
-  For[r = 1, r <= Floor[NumRegions/2], r++,
-    Ls = Join[
-      Ls,
-      GetNewLambdas[
-        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-        dimPs, eqns, beqns, Flatten[regionPts, 1],
-        Ls, \[Kappa]s, dimCY, numParamsInPn, kahlerModuli
-      ]
-    ];
+  nextRegionIndex = 2;
 
-    PrintMsg["Processing region " <> ToString[2 r], frontEnd, verbose];
-    {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
+  While[nextRegionIndex <= NumRegions,
+
+    newLambdaPair = GetNewLambdas[
       varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-      dimPs, coefficients, exponents, Ls[[-2]],
-      NumPts, dimCY, kahlerModuli, 1, precision, 2 r
+      dimPs, eqns, beqns, Flatten[regionPts, 1],
+      Ls, \[Kappa]s, dimCY, numParamsInPn, kahlerModuli
     ];
-    AppendTo[regionPts, newPts];
-    AppendTo[\[Kappa]s, \[Kappa]];
-    AppendTo[Acceptances, Length[newPts]];
-    AppendTo[NumSamples, Length[newPts]];
 
-    PrintMsg["Processing region " <> ToString[2 r + 1], frontEnd, verbose];
+    (* First new metric in the pair *)
+    Ls = Append[Ls, newLambdaPair[[1]]];
+
+    PrintMsg["Processing region " <> ToString[nextRegionIndex], frontEnd, verbose];
     {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
       varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
       dimPs, coefficients, exponents, Ls[[-1]],
-      NumPts, dimCY, kahlerModuli, 1, precision, 2 r + 1
+      NumPts, dimCY, kahlerModuli, 1, precision, nextRegionIndex
     ];
     AppendTo[regionPts, newPts];
     AppendTo[\[Kappa]s, \[Kappa]];
     AppendTo[Acceptances, Length[newPts]];
     AppendTo[NumSamples, Length[newPts]];
+
+    nextRegionIndex++;
+
+    (* Second new metric in the pair, only if needed *)
+    If[nextRegionIndex <= NumRegions,
+      Ls = Append[Ls, newLambdaPair[[2]]];
+
+      PrintMsg["Processing region " <> ToString[nextRegionIndex], frontEnd, verbose];
+      {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
+        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+        dimPs, coefficients, exponents, Ls[[-1]],
+        NumPts, dimCY, kahlerModuli, 1, precision, nextRegionIndex
+      ];
+      AppendTo[regionPts, newPts];
+      AppendTo[\[Kappa]s, \[Kappa]];
+      AppendTo[Acceptances, Length[newPts]];
+      AppendTo[NumSamples, Length[newPts]];
+
+      nextRegionIndex++;
+    ];
   ];
 
   pres = Table[
@@ -929,22 +1046,33 @@ GeneratePointsMCICYIPS[
     {j, Length[Ls]}
   ];
 
-  PrintMsg["Now revisiting all regions with full rejection sampling.", frontEnd, verbose];
-  For[r = 1, r <= Length[Ls], r++,
-    PrintMsg["Reprocessing region " <> ToString[r], frontEnd, verbose];
 
-    {newPts, Acceptance, NumSample} = SamplePointsWithRejectionCICY[
-      varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-      dimPs, coefficients, exponents,
-      Ls, pres, r, NumPts, dimCY, numParamsInPn, \[Kappa]s,
-      kahlerModuli, precision,
-      regionPts[[r]], NumSamples[[r]],
-      frontEnd, verbose
+  If[Length[Ls] > 1,
+    pres = Table[
+      prepareWeightEvaluatorCICY[
+        varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
+        metricBlocksFromL[Ls[[j]]]
+      ],
+      {j, Length[Ls]}
     ];
 
-    regionPts[[r]] = newPts;
-    Acceptances[[r]] = Acceptance;
-    NumSamples[[r]] = NumSample;
+    PrintMsg["Now revisiting all regions with full rejection sampling.", frontEnd, verbose];
+    For[r = 1, r <= Length[Ls], r++,
+      PrintMsg["Reprocessing region " <> ToString[r], frontEnd, verbose];
+
+      {newPts, Acceptance, NumSample} = SamplePointsWithRejectionCICY[
+        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+        dimPs, coefficients, exponents,
+        Ls, pres, r, NumPts, dimCY, numParamsInPn, \[Kappa]s,
+        kahlerModuli, precision,
+        regionPts[[r]], NumSamples[[r]],
+        frontEnd, verbose
+      ];
+
+      regionPts[[r]] = newPts;
+      Acceptances[[r]] = Acceptance;
+      NumSamples[[r]] = NumSample;
+    ];
   ];
 
   regionPts = Table[

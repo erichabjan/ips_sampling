@@ -518,109 +518,108 @@ def integrate_native(integrand, pts, wo, comp_model, normalize_to_vol=None):
         res *= tf.cast(kappa, dtype=res.dtype)
     return res
     
-def analyze_regions(integrand, pts, wo, comp_model, kappas, verbose=True):
-    # Diagnostic tests to understand why importance sampling is worse
+def analyze_regions(integrand, pts, wo, comp_model, kappas, region_labels, verbose=True):
+    region_labels = np.asarray(region_labels).reshape(-1).astype(int)
+    unique_regions = np.sort(np.unique(region_labels))
 
-    # Test 1: Check if kappa values are reasonable
+    if len(unique_regions) != len(kappas):
+        raise ValueError(
+            f"Found {len(unique_regions)} unique regions in region_labels, "
+            f"but {len(kappas)} kappas."
+        )
+
     if verbose:
         print("=== Kappa Analysis ===")
         print(f"Kappa values: {kappas}")
         print(f"Kappa std/mean: {np.std(kappas)/np.mean(kappas):.3f}")
-    
-    # Test 2: Check regional contribution variance
+
     if verbose:
         print("\n=== Regional Contribution Analysis ===")
+
     regional_contributions = []
     regional_variances = []
-    
-    num_pts_per_region = len(pts) // len(kappas)
-    for i in range(len(kappas)):
-        start_idx = num_pts_per_region * i
-        end_idx = num_pts_per_region * (i + 1)
-        
-        # Get integrand values for this region
-        region_integrand = integrand[start_idx:end_idx]
-        region_weights = wo[start_idx:end_idx, 0] / wo[start_idx:end_idx, 1]
-        
-        # Raw contribution (without kappa weighting)
-        raw_contribution = tf.reduce_mean(region_integrand * tf.cast(region_weights, dtype=tf.complex64))
-        
-        # Variance of integrand in this region
-        integrand_var = tf.reduce_mean(tf.abs(region_integrand - tf.reduce_mean(region_integrand))**2)
-        
+
+    aux_weights = tf.convert_to_tensor(wo[:, 0] / wo[:, 1], dtype=tf.complex64)
+
+    for r in unique_regions:
+        mask = (region_labels == r)
+
+        region_integrand = tf.boolean_mask(integrand, mask)
+        region_weights = tf.boolean_mask(aux_weights, mask)
+
+        raw_contribution = tf.reduce_mean(region_integrand * region_weights)
+        integrand_var = tf.reduce_mean(
+            tf.abs(region_integrand - tf.reduce_mean(region_integrand))**2
+        )
+
         regional_contributions.append(raw_contribution.numpy())
-        regional_variances.append(integrand_var.numpy())
-        
+        regional_variances.append(float(integrand_var.numpy()))
+
         if verbose:
-            print(f"Region {i}: contribution = {raw_contribution:.3f}, variance = {integrand_var:.6f}")
-    
+            print(
+                f"Region {r}: N = {np.count_nonzero(mask)}, "
+                f"contribution = {raw_contribution:.3f}, variance = {integrand_var:.6f}"
+            )
+
     if verbose:
         print(f"Regional contribution std: {np.std(regional_contributions):.3f}")
-        print(f"If regions have very different contributions, IPS might help")
-        print(f"If regions are similar, IPS adds noise without benefit")
-    
-    # Test 3: Check if importance weights are well-behaved
-    if verbose:
-        print("\n=== Importance Weight Analysis ===")
-    for i in range(len(kappas)):
-        start_idx = num_pts_per_region * i
-        end_idx = num_pts_per_region * (i + 1)
-        
-        base_weights = wo[start_idx:end_idx, 0] / wo[start_idx:end_idx, 1]
-        importance_weights = base_weights * kappas[i]
-        
-        weight_ratio = kappas[i]
-        effective_sample_size = (tf.reduce_sum(importance_weights)**2) / tf.reduce_sum(importance_weights**2)
-        
-        if verbose:
-            print(f"Region {i}: kappa = {kappas[i]:.4f}, eff_sample_size = {effective_sample_size:.0f}/20000")
-    
-    # For good importance sampling, effective sample size should be reasonably large
+
     total_weights = []
-    aux_weights = tf.convert_to_tensor(wo[:, 0] / wo[:, 1], dtype=tf.complex64)
-    for i in range(len(kappas)):
-        start_idx = num_pts_per_region * i
-        end_idx = num_pts_per_region * (i + 1)
-        region_weights = aux_weights[start_idx:end_idx] * kappas[i]
+    for i, r in enumerate(unique_regions):
+        mask = (region_labels == r)
+        region_weights = aux_weights.numpy()[mask] * kappas[i]
         total_weights.extend(region_weights)
-    
-    total_weights = np.array(total_weights)
+
+    total_weights = np.asarray(total_weights)
     eff_sample_size = (np.sum(total_weights)**2) / np.sum(total_weights**2)
+
     if verbose:
         print(f"Overall effective sample size: {eff_sample_size:.0f} out of {len(pts)}")
         print(f"Efficiency: {eff_sample_size/len(pts):.3f}")
-        print("If efficiency < 0.1, importance sampling is probably hurting more than helping")
 
     return regional_variances
     
-def integrate_variance_kappa_weighted(integrand, pts, wo, comp_model, variances=None, kappas=[1.], normalize_to_vol=None):
+def integrate_variance_kappa_weighted(
+    integrand, pts, wo, comp_model, region_labels,
+    variances=None, kappas=[1.], normalize_to_vol=None
+):
+    region_labels = np.asarray(region_labels).reshape(-1).astype(int)
+    unique_regions = np.sort(np.unique(region_labels))
+
+    if len(unique_regions) != len(kappas):
+        raise ValueError(
+            f"Found {len(unique_regions)} unique regions in region_labels, "
+            f"but {len(kappas)} kappas."
+        )
+
     if variances is not None:
         inv_var_weights = [1.0 / v for v in variances]
         total_inv_var_weight = sum(inv_var_weights)
         variance_weighting = [w / total_inv_var_weight for w in inv_var_weights]
     else:
-        variance_weighting = [1.] * len(kappas)
-        
-    num_pts_per_region = len(pts) // len(kappas)
-    
+        variance_weighting = [1.0] * len(kappas)
+
     aux_weights = tf.convert_to_tensor(wo[:, 0] / wo[:, 1], dtype=tf.complex64)
-    aux_weights_weighted = []
-    
-    for i in range(len(kappas)):
-        start_idx = num_pts_per_region * i
-        end_idx = num_pts_per_region * (i + 1)
-        region_weights = aux_weights[start_idx:end_idx] * kappas[i] * variance_weighting[i]
-        aux_weights_weighted.append(region_weights)
-    
-    # Concatenate and normalize
-    aux_weights_weighted = tf.concat(aux_weights_weighted, axis=0)
+    aux_weights_weighted = tf.TensorArray(tf.complex64, size=len(aux_weights))
+
+    for i, r in enumerate(unique_regions):
+        mask = (region_labels == r)
+        idx = np.where(mask)[0]
+
+        region_weights = aux_weights.numpy()[idx] * kappas[i] * variance_weighting[i]
+        for j, ind in enumerate(idx):
+            aux_weights_weighted = aux_weights_weighted.write(ind, region_weights[j])
+
+    aux_weights_weighted = aux_weights_weighted.stack()
 
     res = (-1.j/2)**comp_model.nfold * tf.reduce_mean(integrand * aux_weights_weighted, axis=-1)
+
     if normalize_to_vol is not None:
         vol = tf.abs(tf.reduce_mean(tf.linalg.det(comp_model(pts)) * aux_weights_weighted, axis=-1))
         kappa = normalize_to_vol / vol
         vol *= tf.cast(kappa, dtype=vol.dtype)
         res *= tf.cast(kappa, dtype=res.dtype)
+
     return res
 
 def config_matrix_from_metadata(metadata):
