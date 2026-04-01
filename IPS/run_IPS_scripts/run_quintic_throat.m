@@ -1,34 +1,29 @@
 (* Import CICY IPS sampler *)
 Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
-(* multi-equation CICY *)
-dimPs = {3, 3};
-degreeMatrix = {
-   {3, 0},
-   {0, 3},
-   {1, 1}
-};
+(* Qunitic Inputs *)
+dimPs = {4};
 
-BlockExponents[d_, n_] := Select[Tuples[Range[0, d], n], Total[#] == d &];
-
-EquationExponents[degRow_, dimPs_] := Module[
-   {blocks},
-   blocks = Table[
-      BlockExponents[degRow[[i]], dimPs[[i]] + 1],
-      {i, Length[dimPs]}
-   ];
-   Flatten[
-      Outer[Join, Sequence @@ blocks, 1],
-      Length[dimPs] - 1
-   ]
-];
-exponents = EquationExponents[#, dimPs] & /@ degreeMatrix;
+exponents = {{
+  {5, 0, 0, 0, 0},
+  {0, 5, 0, 0, 0},
+  {0, 0, 5, 0, 0},
+  {0, 0, 0, 5, 0},
+  {0, 0, 0, 0, 5},
+  {1, 1, 1, 1, 1}
+}};
 
 SeedRandom[1234];
-coefficients = Table[
-   N[RandomReal[{-1, 1}, Length[exponents[[i]]]], 20],
-   {i, Length[exponents]}
-];
+psi = 1.035 - 0.02 I;
+
+coefficients = {{
+  1.0,
+  1.0,
+  1.0,
+  1.0,
+  1.0,
+  -5.0*psi
+}};
 
 kahlerModuli = ConstantArray[1.0, Length[dimPs]];
 targetVolume = Automatic;

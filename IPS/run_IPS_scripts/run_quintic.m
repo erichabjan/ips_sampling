@@ -53,7 +53,7 @@ If[!DirectoryQ[dir],
   Print["[run_torus.m] Created directory: ", dir];
 ];
 
-{points, weights, omegas, patchesLocal, jElimGlobal, regionLabels, kappas, acceptances, numSamples, {dimCY}} =
+{points, weights, omegas, patchesLocal, jElimGlobal, regionLabels, kappas, acceptances, numSamples, {dimCY}, LsData} =
   GeneratePointsMCICYIPS[
     totalNumPts,
     numRegions,
@@ -182,6 +182,26 @@ If[Count[validMask, True] == 0,
   numSamplesFile = StringTemplate["num_samples_``.csv"][numRegions];
   Export[FileNameJoin[{dir, numSamplesFile}], numSamplesNumeric];
 
+  (* Export L matrices as JSON *)
+  lMatricesFile = StringTemplate["L_matrices_``.json"][numRegions];
+  ComplexMatToAssoc[mat_] := <|"real" -> N[Re[mat], 20], "imag" -> N[Im[mat], 20]|>;
+  lMatricesAssoc = Table[
+    <|
+      "region" -> r,
+      "blocks" -> Table[ComplexMatToAssoc[LsData[[r, k]]], {k, Length[dimPs]}]
+    |>,
+    {r, Length[LsData]}
+  ];
+  Export[FileNameJoin[{dir, lMatricesFile}],
+    <|
+      "num_regions" -> Length[LsData],
+      "num_blocks_per_region" -> Length[dimPs],
+      "block_sizes" -> (dimPs + 1),
+      "L_matrices" -> lMatricesAssoc
+    |>,
+    "JSON"
+  ];
+
   metadataFile = StringTemplate["metadata_``.json"][numRegions];
 
   metadataAssoc = <|
@@ -237,7 +257,8 @@ If[Count[validMask, True] == 0,
       "j_elim_global_csv" -> jElimFile,
       "region_labels_csv" -> regionLabelsFile,
       "acceptances_csv" -> acceptancesFile,
-      "num_samples_csv" -> numSamplesFile
+      "num_samples_csv" -> numSamplesFile,
+      "L_matrices_json" -> lMatricesFile
     |>
   |>;
 

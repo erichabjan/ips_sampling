@@ -67,6 +67,26 @@ def _ensure_int_array_nested(x):
     return [np.array(eq, dtype=np.int64) for eq in x]
 
 
+def _load_L_matrices_json(path: Path):
+    """Load L_matrices_{N}.json exported by Mathematica and return
+    a dict  {region_0idx: [h_block_0, h_block_1, ...]}  where each
+    h_block = L^dag @ L  is a numpy complex128 array."""
+    with open(path, "r") as f:
+        data = json.load(f)
+    h_blocks_per_region = {}
+    for entry in data["L_matrices"]:
+        r = int(entry["region"]) - 1          # Mathematica 1-indexed → 0-indexed
+        blocks = []
+        for blk in entry["blocks"]:
+            L_re = np.array(blk["real"], dtype=np.float64)
+            L_im = np.array(blk["imag"], dtype=np.float64)
+            L = L_re + 1j * L_im
+            h = np.conj(L.T) @ L              # h = L^dag @ L
+            blocks.append(h)
+        h_blocks_per_region[r] = blocks
+    return h_blocks_per_region
+
+
 def _train_val_split_indices(n, val_split=0.1, shuffle=False, seed=0):
     idx = np.arange(n)
     if shuffle:
@@ -131,6 +151,7 @@ def main():
     region_labels_f = INPUT_DIR / f"region_labels_{NUM_REGIONS}.csv"
     acceptances_f = INPUT_DIR / f"acceptances_{NUM_REGIONS}.csv"
     num_samples_f = INPUT_DIR / f"num_samples_{NUM_REGIONS}.csv"
+    l_matrices_f = INPUT_DIR / f"L_matrices_{NUM_REGIONS}.json"
 
     required = [points_real_f, points_imag_f, weights_f, omegas_f, metadata_f]
     for p in required:
@@ -316,6 +337,23 @@ def main():
     if ns is not None:
         extras["num_samples"] = ns
 
+    # Load and pack L matrices (h_blocks = L^dag L per region per projective factor)
+    h_blocks_per_region = None
+    if l_matrices_f.exists():
+        h_blocks_per_region = _load_L_matrices_json(l_matrices_f)
+        num_regions_L = len(h_blocks_per_region)
+        num_blocks = len(next(iter(h_blocks_per_region.values())))
+        print(f"[pack] Loaded L matrices: {num_regions_L} regions, {num_blocks} block(s) each")
+        # Store h_blocks as flattened arrays: h_block_r{r}_b{b}_real, h_block_r{r}_b{b}_imag
+        for r, blocks in h_blocks_per_region.items():
+            for b, h in enumerate(blocks):
+                extras[f"h_block_r{r}_b{b}_real"] = h.real.astype(np.float64)
+                extras[f"h_block_r{r}_b{b}_imag"] = h.imag.astype(np.float64)
+        extras["h_blocks_num_regions"] = np.array([num_regions_L], dtype=np.int64)
+        extras["h_blocks_num_blocks"] = np.array([num_blocks], dtype=np.int64)
+    else:
+        print("[pack] No L_matrices JSON found; h_blocks will not be available.")
+
     if extras:
         extras_path = INPUT_DIR / "mathematica_extras.npz"
         np.savez_compressed(extras_path, **extras)
@@ -338,6 +376,7 @@ def main():
         "has_region_labels": bool(region_labels is not None),
         "has_acceptances": bool(acceptances is not None),
         "has_num_samples": bool(num_samples is not None),
+        "has_h_blocks": bool(h_blocks_per_region is not None),
     }
     with open(INPUT_DIR / "pack_summary.json", "w") as f:
         json.dump(summary, f, indent=2)

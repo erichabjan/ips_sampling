@@ -7,7 +7,7 @@ from cymetric.pointgen.pointgen_cicy import CICYPointGenerator
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Sample bicubic using cymetric with geometry from an IPS metadata file. "
+        description="Sample multi-equation CICY using cymetric with geometry from an IPS metadata file. "
                     "Outputs Mathematica-format CSVs/JSON so the result can be packed by "
                     "cymetric_compatibility.py and fed into Euler_number.py."
     )

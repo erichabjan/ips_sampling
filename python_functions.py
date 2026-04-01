@@ -352,6 +352,192 @@ def _ensure_int_array_nested(x) -> List[np.ndarray]:
     return [np.array(eq, dtype=np.int64) for eq in x]
 
 
+def compute_metric_measure_scores(
+    pts, wo, h_blocks_per_region, BASIS, alpha, deg, monomials,
+    kappas, j_elim=None, batch_size=512
+):
+    """
+    For every point x_i and every region metric r, compute
+
+        w_r(x_i) = Re(|Omega|^2 / det(g_r(x_i)))
+
+    and the ownership score
+
+        score_r(x_i) = |kappa_r * w_r(x_i) - 1|.
+
+    This mirrors the Mathematica ownership logic used in
+    attachMetricScoresToPointsCICY.
+
+    Parameters
+    ----------
+    pts : array [N, 2*ncoords]
+        Real-packed points.
+    wo : array [N,2]
+        wo[:,1] = |Omega|^2.
+    h_blocks_per_region : dict
+        region_id -> list of Hermitian blocks h = L^dag L.
+    BASIS, alpha, deg, monomials
+        Same arguments used to build the deformed FS models.
+    kappas : array-like [n_regions]
+        One kappa per region.
+    j_elim : array [N, nhyper] or None
+        Eliminated coordinates.
+    batch_size : int
+        Batch size for metric evaluation.
+
+    Returns
+    -------
+    scores : np.ndarray, shape (n_regions, N)
+        Ownership scores.
+    metric_weights : np.ndarray, shape (n_regions, N)
+        w_r(x_i) = Re(|Omega|^2 / det(g_r(x_i))).
+    """
+    pts = tf.cast(pts, dtype=tf.float32)
+    omegas = np.asarray(wo[:, 1], dtype=np.float64).reshape(-1)
+    kappas = np.asarray(kappas, dtype=np.float64).reshape(-1)
+
+    n_regions = len(kappas)
+    N = len(omegas)
+
+    scores = np.full((n_regions, N), np.inf, dtype=np.float64)
+    metric_weights = np.full((n_regions, N), np.nan, dtype=np.float64)
+
+    for r in tqdm(range(n_regions), desc="Ownership scores"):
+        h_blocks = h_blocks_per_region.get(r, None)
+        model_r = DeformedFSModelComp(
+            None, BASIS=BASIS, alpha=alpha,
+            deg=deg, monomials=monomials,
+            h_blocks=h_blocks
+        )
+
+        num_batches = math.ceil(N / batch_size)
+        for b in range(num_batches):
+            s = b * batch_size
+            e = min((b + 1) * batch_size, N)
+
+            pts_b = pts[s:e]
+            jel_b = None
+            if j_elim is not None:
+                jel_b = tf.convert_to_tensor(np.asarray(j_elim)[s:e], dtype=tf.int64)
+
+            g_b = model_r(pts_b, j_elim=jel_b).numpy().astype(np.complex128)
+            detg_b = np.linalg.det(g_b)
+
+            # Mathematica logic: w = Re[OmegaOmegaBar / detgNorm]
+            w_b = np.real(omegas[s:e] / detg_b)
+
+            bad = ~np.isfinite(w_b)
+            score_b = np.abs(kappas[r] * w_b - 1.0)
+            score_b[bad] = np.inf
+
+            metric_weights[r, s:e] = w_b
+            scores[r, s:e] = score_b
+
+    return scores, metric_weights
+
+
+def compute_region_ownership_labels(
+    pts, wo, h_blocks_per_region, BASIS, alpha, deg, monomials,
+    kappas, j_elim=None, batch_size=512, ownership_tol=0.0,
+    return_details=False
+):
+    """
+    Compute geometric ownership labels in Python.
+
+    The owner of a point is the region metric r minimizing
+
+        |kappa_r * w_r(x) - 1|,
+
+    matching the Mathematica score.
+
+    Parameters
+    ----------
+    ownership_tol : float
+        Optional tie tolerance. If > 0, points within ownership_tol of the
+        minimum score are still assigned to the first minimum.
+
+    Returns
+    -------
+    owner_labels : np.ndarray, shape (N,)
+        0-indexed owner region of each point.
+    If return_details:
+        owner_labels, min_scores, scores, metric_weights
+    """
+    scores, metric_weights = compute_metric_measure_scores(
+        pts, wo, h_blocks_per_region, BASIS, alpha, deg, monomials,
+        kappas, j_elim=j_elim, batch_size=batch_size
+    )
+
+    min_scores = np.min(scores, axis=0)
+    owner_labels = np.argmin(scores, axis=0).astype(np.int64)
+
+    if ownership_tol > 0:
+        # keep first minimum among all nearly-tied regions
+        for i in range(scores.shape[1]):
+            near = np.where(scores[:, i] <= min_scores[i] + ownership_tol)[0]
+            owner_labels[i] = int(near[0])
+
+    if return_details:
+        return owner_labels, min_scores, scores, metric_weights
+    return owner_labels
+
+def estimate_region_volume_fractions(
+    wo, source_region_labels, owner_labels, kappas
+):
+    """
+    Estimate region volume fractions f_r from ownership labels.
+
+    The source sampling distribution is corrected using the same IPS
+    Kähler-volume weights that appear in the top-form estimator:
+
+        W_i = (wo[i,0] / wo[i,1]) * kappa_source(i)
+
+    Then the volume fraction of ownership region r is estimated by
+
+        f_r = sum_{i owned by r} W_i / sum_i W_i.
+
+    Parameters
+    ----------
+    wo : array [N,2]
+        wo[:,0] = IPS weights, wo[:,1] = |Omega|^2
+    source_region_labels : array [N]
+        0-indexed region labels indicating which metric generated each point.
+    owner_labels : array [N]
+        0-indexed ownership labels.
+    kappas : array [n_regions]
+        One kappa per source region.
+
+    Returns
+    -------
+    f : np.ndarray, shape (n_regions,)
+        Estimated region volume fractions, summing to ~1.
+    point_weights : np.ndarray, shape (N,)
+        The per-point source-corrected Kähler-volume weights W_i.
+    """
+    source_region_labels = np.asarray(source_region_labels, dtype=np.int64).reshape(-1)
+    owner_labels = np.asarray(owner_labels, dtype=np.int64).reshape(-1)
+    kappas = np.asarray(kappas, dtype=np.float64).reshape(-1)
+
+    if len(source_region_labels) != len(owner_labels):
+        raise ValueError("source_region_labels and owner_labels must have the same length")
+
+    aux_weights = np.asarray(wo[:, 0] / wo[:, 1], dtype=np.float64).reshape(-1)
+    if len(aux_weights) != len(owner_labels):
+        raise ValueError("wo must have the same number of rows as owner_labels")
+
+    kappa_source = kappas[source_region_labels]
+    point_weights = aux_weights * kappa_source
+
+    total = np.sum(point_weights)
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError("Total source-corrected weight is nonpositive or nonfinite")
+
+    n_regions = len(kappas)
+    numerators = np.bincount(owner_labels, weights=point_weights, minlength=n_regions)
+    f = numerators / total
+
+    return f, point_weights
+
 def cy_volume_from_intersections(
     input_dir: Union[str, Path],
     num_regions: int = 1,
@@ -489,23 +675,107 @@ def compute_riemann(target_file, pts, comp_model, j_elim=None, batch_size=10000)
 
     return tf.cast(riem, dtype=tf.complex64)
 
-def get_chern_classes(riem, comp_model):
+def get_chern_classes(riem, comp_model, g_cy=None):
+    """
+    Compute Chern classes using the original contraction convention that was
+    already producing reasonable Euler estimates in the single-region code.
+
+    If g_cy is provided, also return
+        chi_density = c3_form / omega_top
+    for diagnostics / future regional-volume estimators.
+
+    Returns
+    -------
+    If g_cy is None:
+        c1, c2, c3, c3_form
+    If g_cy is not None:
+        c1, c2, c3, c3_form, chi_density
+    """
     # first Chern class
     tr_R = -tf.einsum('xaabc->xcb', riem)
-    c1 = 1.j/(2 * math.pi) * tr_R
-    
+    c1 = 1.j / (2 * math.pi) * tr_R
+
     # second Chern class
     tr_R2 = tf.einsum('xabmn, xbaop->xnmpo', riem, riem)
-    c2 =  1./(2*(2*math.pi)**2) * (tr_R2 - tf.einsum('xab,xcd->xabcd', tr_R, tr_R))
-    
-    # thrid Chern class
-    tr_R3 =  tf.einsum('xabmn, xbcop, xcaqr->xnmporq', riem, riem, riem)
-    c3 = 1./3. * tf.einsum('xmn,xopqr->xmnopqr', c1, c2) + 1./(3*(2*math.pi)**2) * tf.einsum('xmn,xopqr->xmnopqr', c1, tr_R2) -1.j/(3*(2*math.pi)**3) * tr_R3
-    
-    c3_form = 1./math.factorial(comp_model.nfold) * tf.einsum('xmnopqr,moq,npr->x', c3, comp_model.lc, comp_model.lc)
+    c2 = 1.0 / (2 * (2 * math.pi) ** 2) * (
+        tr_R2 - tf.einsum('xab,xcd->xabcd', tr_R, tr_R)
+    )
+
+    # third Chern class
+    tr_R3 = tf.einsum('xabmn, xbcop, xcaqr->xnmporq', riem, riem, riem)
+    c3 = (
+        1.0 / 3.0 * tf.einsum('xmn,xopqr->xmnopqr', c1, c2)
+        + 1.0 / (3 * (2 * math.pi) ** 2) * tf.einsum('xmn,xopqr->xmnopqr', c1, tr_R2)
+        - 1.j / (3 * (2 * math.pi) ** 3) * tr_R3
+    )
+
+    c3_form = 1.0 / math.factorial(comp_model.nfold) * tf.einsum(
+        'xmnopqr,moq,npr->x', c3, comp_model.lc, comp_model.lc
+    )
+
+    if g_cy is not None:
+        omega_top = compute_kahler_top_contraction(
+            g_cy, comp_model.lc, comp_model.nfold
+        )
+        chi_density = c3_form / tf.cast(omega_top, c3_form.dtype)
+        return c1, c2, c3, c3_form, chi_density
 
     return c1, c2, c3, c3_form
-    
+
+
+def compute_kahler_top_contraction(g_cy, lc, nfold):
+    """Contract the Kähler top form omega^n / n! with the same epsilon pattern
+    used for c3_form.
+
+    Convention:
+        omega_{a \bar b} = (i/2) g_{a \bar b}
+
+    With the same LC contraction pattern as c3_form, this should satisfy
+    pointwise:
+        omega_top / det(g) = (i/2)^n
+    up to numerical error.
+    """
+    lc128 = tf.cast(lc, tf.complex128)
+    g128 = tf.cast(g_cy, tf.complex128)
+
+    # Kähler 2-form in the same real-volume convention used by the old
+    # (-i/2)^n prefactor machinery.
+    omega = tf.constant(0.5j, dtype=tf.complex128) * g128
+
+    if nfold == 3:
+        omega_top = (1.0 / math.factorial(3)) * tf.einsum(
+            'xmn,xop,xqr,moq,npr->x', omega, omega, omega, lc128, lc128
+        )
+    elif nfold == 2:
+        omega_top = (1.0 / math.factorial(2)) * tf.einsum(
+            'xmn,xop,mo,np->x', omega, omega, lc128, lc128
+        )
+    elif nfold == 1:
+        omega_top = omega[:, 0, 0]
+    else:
+        raise ValueError(f"compute_kahler_top_contraction: unsupported nfold={nfold}")
+
+    return omega_top
+
+def kahler_top_diagnostics(g_cy, lc, nfold):
+    """Diagnostic for the Kähler top-form normalization.
+
+    Returns
+    -------
+    omega_top : complex128 [N]
+        Contracted Kähler top-form scalar.
+    det_g : complex128 [N]
+        Determinant of the CY metric.
+    ratio : complex128 [N]
+        omega_top / det(g), which should be approximately (i/2)^n pointwise.
+    """
+    g128 = tf.cast(g_cy, tf.complex128)
+    omega_top = compute_kahler_top_contraction(g_cy, lc, nfold)
+    det_g = tf.linalg.det(g128)
+    ratio = omega_top / det_g
+    return omega_top, det_g, ratio
+
+
 def integrate_native(integrand, pts, wo, comp_model, normalize_to_vol=None):
     aux_weights = tf.convert_to_tensor(wo[:, 0] / wo[:, 1], dtype=tf.complex64)
     aux_weights = tf.repeat(tf.expand_dims(aux_weights, axis=0), repeats=[len(comp_model.BASIS['KMODULI'])], axis=0)
@@ -755,3 +1025,506 @@ def euler_cicy(dims, multidegrees, check_cy=False):
             total += coeff
 
     return sp.simplify(total)
+
+
+###############################################################################
+# IPS-consistent metric, curvature, and integration functions
+###############################################################################
+
+def h_blocks_from_L(L_matrices):
+    """Compute Hermitian deformation blocks h_i = L_i^dag L_i from L matrices.
+
+    Args:
+        L_matrices: list of numpy arrays, one per projective factor.
+                    Each L_i has shape (n_i+1, n_i+1).
+
+    Returns:
+        list of numpy arrays h_i = L_i^dag @ L_i (positive-definite Hermitian).
+    """
+    return [np.conj(L.T) @ L for L in L_matrices]
+
+
+def _deformed_fs_block(z, h, t):
+    """Deformed Fubini-Study metric on one P^n factor.
+
+    Computes  g_{a bar{b}} = (t / pi) (s H^T_{ab} - conj(Hz)_a (Hz)_b) / s^2
+    where  s = bar{z} . h . z  and  Hz = h . z.
+
+    This matches the Mathematica ``FSBlockMetric`` convention and reduces
+    to the standard cymetric FS metric when h = I.
+
+    Args:
+        z: tf.complex64 [batch, n+1] — homogeneous coordinates for this P^n.
+        h: tf.complex64 [n+1, n+1] — Hermitian matrix (h = L^dag L).
+        t: tf.complex64 scalar — Kähler modulus for this factor.
+
+    Returns:
+        tf.complex64 [batch, n+1, n+1] — metric in ambient coordinates.
+    """
+    pi_c = tf.constant(np.pi, dtype=tf.complex64)
+    hz = tf.einsum('ij,xj->xi', h, z)                         # H·z  [batch, n+1]
+    conj_hz = tf.math.conj(hz)                                # conj(H·z) = z̄·H  [batch, n+1]
+    zhz = tf.reduce_sum(tf.math.conj(z) * hz, axis=-1)        # z̄·h·z  [batch]
+
+    outer = tf.einsum('xa,xb->xab', conj_hz, hz)              # conj(Hz)_a (Hz)_b
+    h_T = tf.transpose(h)                                     # H^T = conj(H) for Hermitian
+    h_T_broad = tf.broadcast_to(h_T[None, :, :],
+                                [tf.shape(z)[0], tf.shape(h_T)[0], tf.shape(h_T)[1]])
+
+    numerator = tf.einsum('x,xab->xab', zhz, h_T_broad) - outer
+    zhz_sq = tf.reshape(zhz * zhz, [-1, 1, 1])
+
+    return (t / pi_c) * numerator / zhz_sq
+
+
+class DeformedFSModelComp(SpectralFSModelComp):
+    """SpectralFSModelComp whose FS metric is deformed by per-block Hermitian
+    matrices  h_i = L_i^dag L_i.   When h_blocks is None the standard FS
+    metric is used (equivalent to h_i = I for all i).
+
+    Usage::
+
+        model = DeformedFSModelComp(
+            None, BASIS=BASIS, alpha=alpha, deg=2, monomials=monomials,
+            h_blocks=[h1, h2]     # one Hermitian per projective factor
+        )
+        g_cy = model(pts, j_elim=jel)   # deformed FS pulled back to CY
+    """
+
+    def __init__(self, *args, h_blocks=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if h_blocks is not None:
+            self.h_blocks = [
+                tf.cast(tf.constant(np.asarray(h, dtype=np.complex64)),
+                        dtype=tf.complex64)
+                for h in h_blocks
+            ]
+        else:
+            self.h_blocks = None
+
+    def call(self, input_tensor, training=True, j_elim=None):
+        if self.h_blocks is None:
+            return self.fubini_study_pb(input_tensor, j_elim=j_elim)
+        return self._deformed_fubini_study_pb(input_tensor, j_elim=j_elim)
+
+    def _deformed_fubini_study_pb(self, points, j_elim=None):
+        ts = self.BASIS['KMODULI']
+        pb = self.pullbacks(points, j_elim=j_elim)
+
+        if self.nProjective > 1:
+            cpoints = tf.complex(
+                points[:, :self.degrees[0]],
+                points[:, self.ncoords:self.ncoords + self.degrees[0]])
+            fs = _deformed_fs_block(cpoints, self.h_blocks[0], ts[0])
+            fs = tf.einsum('xij,ia,bj->xab', fs,
+                           self.proj_matrix['0'],
+                           tf.transpose(self.proj_matrix['0']))
+            for i in range(1, self.nProjective):
+                s = tf.reduce_sum(self.degrees[:i])
+                e = s + self.degrees[i]
+                cpoints = tf.complex(points[:, s:e],
+                                     points[:, self.ncoords + s:
+                                                self.ncoords + e])
+                fs_tmp = _deformed_fs_block(cpoints, self.h_blocks[i], ts[i])
+                fs_tmp = tf.einsum('xij,ia,bj->xab', fs_tmp,
+                                   self.proj_matrix[str(i)],
+                                   tf.transpose(self.proj_matrix[str(i)]))
+                fs += fs_tmp
+        else:
+            cpoints = tf.complex(
+                points[:, :self.ncoords],
+                points[:, self.ncoords:2 * self.ncoords])
+            fs = _deformed_fs_block(cpoints, self.h_blocks[0], ts[0])
+
+        return tf.einsum('xai,xij,xbj->xab', pb, fs, tf.math.conj(pb))
+
+
+# ── optimised curvature (stacked real/imag → single tape per level) ──────
+
+def christoffel_opt(g_model, pts, j_elim=None):
+    """Christoffel symbols Gamma^a_{bc} with a single GradientTape call,
+    keeping the full cymetric pipeline in its native float32/complex64 dtype.
+    """
+    ncoords = g_model.ncoords
+
+    with tf.GradientTape(persistent=True) as tape:
+        tape.watch(pts)
+        g = g_model(pts, j_elim=j_elim)   # complex64
+        g_stacked = tf.concat([tf.math.real(g), tf.math.imag(g)], axis=1)  # float32
+
+    d_g_stacked = tape.batch_jacobian(
+        g_stacked, pts, experimental_use_pfor=False
+    )
+    del tape
+
+    nf = int(g.shape[1])
+    d_g_re = d_g_stacked[:, :nf, :, :]
+    d_g_im = d_g_stacked[:, nf:, :, :]
+
+    dx_g_re, dy_g_re = d_g_re[:, :, :, :ncoords], d_g_re[:, :, :, ncoords:]
+    dx_g_im, dy_g_im = d_g_im[:, :, :, :ncoords], d_g_im[:, :, :, ncoords:]
+
+    d_g = tf.complex(dx_g_re + dy_g_im, -dy_g_re + dx_g_im)  # complex64
+
+    pbs = g_model.pullbacks(pts, j_elim=j_elim)  # complex64
+    d_g_pb = tf.einsum('xbn,xcdn->xbcd', pbs, d_g)
+    gamma = tf.einsum('xbcd,xda->xabc', d_g_pb, tf.linalg.inv(g))
+
+    return gamma
+
+
+def riemann_opt(g_model, pts, j_elim=None):
+    """Riemann tensor R^a_{b,c bar{d}} with a single GradientTape call
+    at each differentiation level, using native float32/complex64 dtype.
+    """
+    ncoords = g_model.ncoords
+
+    with tf.GradientTape(persistent=True) as tape:
+        tape.watch(pts)
+        gamma = christoffel_opt(g_model, pts, j_elim=j_elim)   # complex64
+        gamma_stacked = tf.concat(
+            [tf.math.real(gamma), tf.math.imag(gamma)], axis=1
+        )  # float32
+
+    d_gamma_stacked = tape.batch_jacobian(
+        gamma_stacked, pts, experimental_use_pfor=False
+    )
+    del tape
+
+    nf = int(gamma.shape[1])
+    d_re = d_gamma_stacked[:, :nf, :, :, :]
+    d_im = d_gamma_stacked[:, nf:, :, :, :]
+
+    dx_re, dy_re = d_re[:, :, :, :, :ncoords], d_re[:, :, :, :, ncoords:]
+    dx_im, dy_im = d_im[:, :, :, :, :ncoords], d_im[:, :, :, :, ncoords:]
+
+    dbarc_gamma = tf.complex(dx_re - dy_im, dy_re + dx_im)  # complex64
+
+    pbs = g_model.pullbacks(pts, j_elim=j_elim)  # complex64
+    return -tf.einsum('xci,xabdi->xabcd', tf.math.conj(pbs), dbarc_gamma)
+
+
+# ── per-region Riemann computation ───────────────────────────────────────
+
+def compute_riemann_regional(
+    pts, region_labels, h_blocks_per_region,
+    BASIS, alpha, deg, monomials,
+    j_elim=None, batch_size=512, return_metric=False
+):
+    """Compute the Riemann tensor for every point using the deformed FS
+    metric of that point's region.
+
+    Args:
+        pts:  np or tf array [N, 2*ncoords], float.
+        region_labels:  int array [N] (0-indexed).
+        h_blocks_per_region:  dict  {region_id: list_of_h_matrices} where
+            each list has one Hermitian h_i per projective factor.
+            Region 0 may use ``None`` or a list of identity matrices.
+        BASIS, alpha, deg, monomials:  same arguments used to construct
+            ``SpectralFSModelComp``.
+        j_elim:  int array [N, nhyper] or None.
+        batch_size:  batch size for Riemann computation.
+        return_metric:  if True, also return the CY metric g at each point,
+            evaluated with the same regional model used for curvature.
+
+    Returns:
+        tf.complex64 tensor [N, nfold, nfold, nfold, nfold]
+        when return_metric is False.
+
+        (riem, g_cy) tuple when return_metric is True, where g_cy is
+        tf.complex64 tensor [N, nfold, nfold].
+    """
+    pts = tf.cast(pts, dtype=tf.float32)
+    region_labels = np.asarray(region_labels).reshape(-1).astype(int)
+    unique_regions = np.sort(np.unique(region_labels))
+
+    # determine output shape from a throwaway model
+    tmp = SpectralFSModelComp(None, BASIS=BASIS, alpha=alpha,
+                              deg=deg, monomials=monomials)
+    nf = tmp.nfold
+    del tmp
+
+    N = len(pts)
+    riem_out = np.zeros((N, nf, nf, nf, nf), dtype=np.complex64)
+    if return_metric:
+        g_out = np.zeros((N, nf, nf), dtype=np.complex64)
+
+    for r in tqdm(unique_regions, desc="Riemann per region"):
+        mask = (region_labels == r)
+        idx = np.where(mask)[0]
+        pts_r = tf.gather(pts, idx)
+        jel_r = None
+        if j_elim is not None:
+            jel_r = tf.convert_to_tensor(
+                np.asarray(j_elim)[idx], dtype=tf.int64)
+
+        h_blocks = h_blocks_per_region.get(r, None)
+        model_r = DeformedFSModelComp(
+            None, BASIS=BASIS, alpha=alpha,
+            deg=deg, monomials=monomials,
+            h_blocks=h_blocks
+        )
+
+        num_batches = math.ceil(len(pts_r) / batch_size)
+        riem_chunks = []
+        g_chunks = [] if return_metric else None
+        for b in range(num_batches):
+            s = b * batch_size
+            e = min((b + 1) * batch_size, len(pts_r))
+            jb = jel_r[s:e] if jel_r is not None else None
+            riem_chunks.append(riemann_opt(model_r, pts_r[s:e], j_elim=jb).numpy())
+            if return_metric:
+                g_chunks.append(model_r(pts_r[s:e], j_elim=jb).numpy())
+
+        riem_out[idx] = np.concatenate(riem_chunks, axis=0)
+        if return_metric:
+            g_out[idx] = np.concatenate(g_chunks, axis=0)
+
+    riem_tensor = tf.cast(riem_out, dtype=tf.complex64)
+    if return_metric:
+        g_tensor = tf.cast(g_out, dtype=tf.complex64)
+        return riem_tensor, g_tensor
+    return riem_tensor
+
+
+# ── corrected IPS integration ────────────────────────────────────────────
+
+def integrate_euler_top_form_regional(
+    integrand, pts, wo, comp_model, region_labels, kappas, normalize_to_vol=None
+):
+    """
+    Generalization of the old working top-form estimator.
+
+    This reduces to the old single-region estimator when there is only one
+    region, but also supports per-point regional kappas.
+
+    Parameters
+    ----------
+    integrand : complex tensor [N]
+        Typically c3_form.
+    pts : tensor/array [N, 2*ncoords]
+        Real-packed CY points.
+    wo : array [N,2]
+        wo[:,0] = IPS weights
+        wo[:,1] = |Omega|^2
+    comp_model : model
+        Used for nfold and for sampled-volume normalization.
+    region_labels : array [N]
+        0-indexed region labels.
+    kappas : array [n_regions]
+        One kappa per region.
+    normalize_to_vol : float or None
+        If provided, rescale using the sampled Kähler volume as in the old code.
+
+    Returns
+    -------
+    complex scalar
+    """
+    region_labels = np.asarray(region_labels).reshape(-1).astype(int)
+    unique_regions = np.sort(np.unique(region_labels))
+
+    if len(unique_regions) != len(kappas):
+        raise ValueError(
+            f"Found {len(unique_regions)} unique regions in region_labels, "
+            f"but {len(kappas)} kappas."
+        )
+
+    aux_weights = np.asarray(wo[:, 0] / wo[:, 1], dtype=np.complex64)
+
+    # Per-point regional kappa
+    kappa_pt = np.zeros(len(region_labels), dtype=np.float32)
+    for i, r in enumerate(unique_regions):
+        kappa_pt[region_labels == r] = kappas[i]
+
+    total_weights = tf.convert_to_tensor(aux_weights * kappa_pt, dtype=tf.complex64)
+    integrand = tf.cast(integrand, dtype=tf.complex64)
+
+    res = (-1.j / 2) ** comp_model.nfold * tf.reduce_mean(integrand * total_weights, axis=-1)
+
+    if normalize_to_vol is not None:
+        pts_tf = tf.cast(pts, dtype=tf.float32)
+        vol = tf.abs(
+            tf.reduce_mean(
+                tf.linalg.det(comp_model(pts_tf)) * total_weights,
+                axis=-1
+            )
+        )
+        kappa_norm = normalize_to_vol / vol
+        res *= tf.cast(kappa_norm, dtype=res.dtype)
+
+    return res
+
+def integrate_euler_ips(
+    integrand, wo, kappas, region_labels, nfold, normalize_to_vol,
+    normalized=False, region_volume_weights=None
+):
+    """Compute the Euler characteristic from IPS samples.
+
+    Parameters
+    ----------
+    integrand : array/tensor
+        If normalized=True, this is chi_density defined by
+            c_n = chi_density * (omega^n / n!)
+        and should be averaged with respect to the Kähler volume measure.
+
+        If normalized=False, this is the raw top-form integrand and the
+        legacy IPS weighting is used.
+    wo : array-like, shape (N,2)
+        wo[:,0] = IPS weight, wo[:,1] = |Omega|^2
+    kappas : array-like
+        One kappa per region.
+    region_labels : array-like
+        0-indexed region id per point.
+    nfold : int
+        Complex dimension.
+    normalize_to_vol : float
+        Target Kähler volume.
+    normalized : bool
+        Whether integrand is chi_density.
+    region_volume_weights : None or array-like
+        Optional weights V_r / sum_s V_s for combining regional means when
+        multiple sampling metrics are used.
+
+    Notes
+    -----
+    For normalized=True, do NOT use wo[:,0]/wo[:,1]. chi_density is already
+    a scalar with respect to the Kähler measure, so the correct estimator is:
+
+        chi = Vol_K * mean(chi_density)                  (single metric)
+
+    or, for multiple metrics / ownership regions,
+
+        chi = Vol_K * sum_r f_r * mean_r(chi_density)
+
+    where f_r are the region volume fractions.
+    """
+    integrand = tf.cast(integrand, tf.complex64)
+    region_labels = np.asarray(region_labels).reshape(-1).astype(int)
+    unique_regions = np.sort(np.unique(region_labels))
+
+    if normalized:
+        # Single-metric case or no supplied regional volume fractions:
+        # use the ordinary sample mean of chi_density.
+        if len(unique_regions) == 1 or region_volume_weights is None:
+            return tf.cast(normalize_to_vol, tf.complex64) * tf.reduce_mean(integrand)
+
+        # Multi-metric case: combine regional means with explicit region-volume weights.
+        region_volume_weights = np.asarray(region_volume_weights, dtype=np.float64)
+        if region_volume_weights.shape != (len(unique_regions),):
+            raise ValueError(
+                f"region_volume_weights must have shape ({len(unique_regions)},), "
+                f"got {region_volume_weights.shape}"
+            )
+        if not np.isclose(np.sum(region_volume_weights), 1.0, rtol=0, atol=1e-8):
+            raise ValueError("region_volume_weights must sum to 1.")
+
+        regional_means = []
+        for r in unique_regions:
+            mask = (region_labels == r)
+            vals_r = tf.boolean_mask(integrand, mask)
+            if tf.size(vals_r) == 0:
+                raise ValueError(f"Region {r} has no points.")
+            regional_means.append(tf.reduce_mean(vals_r))
+
+        regional_means = tf.stack(regional_means)
+        weights_tf = tf.cast(region_volume_weights, tf.complex64)
+        return tf.cast(normalize_to_vol, tf.complex64) * tf.reduce_sum(weights_tf * regional_means)
+
+    # Legacy raw-top-form path
+    aux_weights = tf.convert_to_tensor(wo[:, 0] / wo[:, 1], dtype=tf.complex64)
+
+    kappa_arr = np.zeros(len(region_labels), dtype=np.float64)
+    for i, r in enumerate(unique_regions):
+        kappa_arr[region_labels == r] = kappas[i]
+    kappa_pt = tf.cast(kappa_arr, dtype=tf.complex64)
+
+    weighted = aux_weights * kappa_pt
+    return (-1.j / 2) ** nfold * tf.reduce_mean(integrand * weighted, axis=-1)
+
+
+def integrate_euler_density_by_owner_regions(
+    chi_density, owner_labels, region_volume_fractions, point_weights, normalize_to_vol
+):
+    """
+    Compute
+
+        chi = Vol_K * sum_r f_r * <chi_density>_r
+
+    where both f_r and <chi_density>_r are estimated with the same
+    source-corrected Kähler-volume importance weights.
+
+    Parameters
+    ----------
+    chi_density : array/tensor [N]
+        Scalar Euler density c3 / (omega^n / n!).
+    owner_labels : array [N]
+        0-indexed ownership labels.
+    region_volume_fractions : array [n_regions]
+        Fractions f_r summing to 1.
+    point_weights : array [N]
+        Source-corrected Kähler-volume importance weights
+            W_i = kappa_source(i) * wo[i,0] / wo[i,1]
+    normalize_to_vol : float
+        Total Kähler volume.
+
+    Returns
+    -------
+    complex scalar
+    """
+    chi_density = np.asarray(chi_density, dtype=np.complex128).reshape(-1)
+    owner_labels = np.asarray(owner_labels, dtype=np.int64).reshape(-1)
+    f = np.asarray(region_volume_fractions, dtype=np.float64).reshape(-1)
+    point_weights = np.asarray(point_weights, dtype=np.float64).reshape(-1)
+
+    if len(chi_density) != len(owner_labels):
+        raise ValueError("chi_density and owner_labels must have the same length")
+    if len(point_weights) != len(owner_labels):
+        raise ValueError("point_weights and owner_labels must have the same length")
+    if not np.isclose(np.sum(f), 1.0, rtol=0, atol=1e-8):
+        raise ValueError("region_volume_fractions must sum to 1")
+
+    regional_means = np.zeros(len(f), dtype=np.complex128)
+
+    for r in range(len(f)):
+        mask = (owner_labels == r)
+        if not np.any(mask):
+            regional_means[r] = 0.0 + 0.0j
+            continue
+
+        w_r = point_weights[mask]
+        x_r = chi_density[mask]
+
+        denom = np.sum(w_r)
+        if not np.isfinite(denom) or denom <= 0:
+            raise ValueError(f"Nonpositive or nonfinite total weight in owner region {r}")
+
+        regional_means[r] = np.sum(w_r * x_r) / denom
+
+    return np.complex128(normalize_to_vol) * np.sum(f * regional_means)
+
+
+def integrate_euler_multi_region_density(
+    chi_density, wo, source_region_labels, owner_labels, kappas, normalize_to_vol
+):
+    """
+    Convenience wrapper that:
+      1) estimates region volume fractions from source IPS weights and owner labels
+      2) computes Vol_K * sum_r f_r * <chi_density>_r
+         with weighted regional means
+    """
+    f_r, point_weights = estimate_region_volume_fractions(
+        wo=wo,
+        source_region_labels=source_region_labels,
+        owner_labels=owner_labels,
+        kappas=kappas
+    )
+
+    chi = integrate_euler_density_by_owner_regions(
+        chi_density=chi_density,
+        owner_labels=owner_labels,
+        region_volume_fractions=f_r,
+        point_weights=point_weights,
+        normalize_to_vol=normalize_to_vol
+    )
+
+    return chi, f_r, point_weights

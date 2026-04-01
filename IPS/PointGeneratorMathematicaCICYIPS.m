@@ -1113,6 +1113,7 @@ GeneratePointsMCICYIPS[
     \[Kappa]s,
     Acceptances,
     NumSamples,
-    {dimCY}
+    {dimCY},
+    Ls
   }];
 ];

@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=multi_eq_sampling
 #SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_multi_eq_%A_%a.log
-#SBATCH --array=0-3
+# SBATCH --array=0-3
+#SBATCH --array=0
 #SBATCH --cpus-per-task=1
 #SBATCH --time=08:00:00
 #SBATCH --mem=15G
