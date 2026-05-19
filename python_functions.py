@@ -1187,7 +1187,7 @@ def riemann_opt(g_model, pts, j_elim=None):
         )  # float32
 
     d_gamma_stacked = tape.batch_jacobian(
-        gamma_stacked, pts, experimental_use_pfor=False
+        gamma_stacked, pts, experimental_use_pfor=True
     )
     del tape
 
@@ -1209,10 +1209,22 @@ def riemann_opt(g_model, pts, j_elim=None):
 def compute_riemann_regional(
     pts, region_labels, h_blocks_per_region,
     BASIS, alpha, deg, monomials,
-    j_elim=None, batch_size=512, return_metric=False
+    j_elim=None, batch_size=2048, return_metric=False,
+    save_dir=None
 ):
     """Compute the Riemann tensor for every point using the deformed FS
     metric of that point's region.
+
+    If *save_dir* is given the Riemann tensor and (when *return_metric* is
+    True) the CY metric are saved to / loaded from that directory.  This
+    allows the expensive curvature computation to be run once and the
+    integration step to be re-tested quickly afterwards.
+
+    Saved files
+    -----------
+    ``<save_dir>/riemann_regional.npz``
+        Keys ``riemann`` (complex64, [N, nf, nf, nf, nf]) and, when
+        *return_metric* is True, ``g_cy`` (complex64, [N, nf, nf]).
 
     Args:
         pts:  np or tf array [N, 2*ncoords], float.
@@ -1226,6 +1238,7 @@ def compute_riemann_regional(
         batch_size:  batch size for Riemann computation.
         return_metric:  if True, also return the CY metric g at each point,
             evaluated with the same regional model used for curvature.
+        save_dir:  if not None, save/load cached results from this directory.
 
     Returns:
         tf.complex64 tensor [N, nfold, nfold, nfold, nfold]
@@ -1234,6 +1247,7 @@ def compute_riemann_regional(
         (riem, g_cy) tuple when return_metric is True, where g_cy is
         tf.complex64 tensor [N, nfold, nfold].
     """
+    # ── compute from scratch ────────────────────────────────────────────
     pts = tf.cast(pts, dtype=tf.float32)
     region_labels = np.asarray(region_labels).reshape(-1).astype(int)
     unique_regions = np.sort(np.unique(region_labels))
@@ -1280,6 +1294,15 @@ def compute_riemann_regional(
         if return_metric:
             g_out[idx] = np.concatenate(g_chunks, axis=0)
 
+    # ── save to cache ───────────────────────────────────────────────────
+    if save_dir is not None:
+        cache_path = os.path.join(save_dir, "riemann_regional.npz")
+        save_dict = {"riemann": riem_out}
+        if return_metric:
+            save_dict["g_cy"] = g_out
+        np.savez(cache_path, **save_dict)
+        print(f"Saved Riemann tensor to {cache_path}")
+
     riem_tensor = tf.cast(riem_out, dtype=tf.complex64)
     if return_metric:
         g_tensor = tf.cast(g_out, dtype=tf.complex64)
@@ -1287,10 +1310,103 @@ def compute_riemann_regional(
     return riem_tensor
 
 
+# ── curvature outlier filtering ─────────────────────────────────────────
+
+def filter_curvature_outliers(
+    riemann_tensor, pts, wo, region_labels, j_elim=None, g_cy=None,
+    owner_labels=None, method="iqr", iqr_factor=3.0, percentile=99.5,
+    verbose=True
+):
+    """Remove points whose curvature norm is an extreme outlier.
+
+    For multi-equation CICYs the pullback involves inverting an nhyper×nhyper
+    matrix B.  At points where B is ill-conditioned the auto-differentiated
+    curvature can be orders of magnitude too large (float32 amplification).
+    A handful of such points can completely dominate the Monte-Carlo average.
+
+    This function identifies those points in log-space and returns filtered
+    copies of every array that is indexed by the point axis.
+
+    Parameters
+    ----------
+    riemann_tensor : tf or np array [N, nf, nf, nf, nf]
+    pts, wo, region_labels, j_elim, g_cy, owner_labels :
+        Arrays whose first axis is the point axis (N).
+    method : {"iqr", "percentile"}
+        "iqr"        – keep points with  log10(curv) < Q3 + iqr_factor*IQR
+        "percentile" – keep points with  curv < np.percentile(curv, percentile)
+    iqr_factor : float
+        Multiplier for the IQR fence (default 3.0).
+    percentile : float
+        Percentile threshold when method="percentile" (default 99.5).
+    verbose : bool
+        Print diagnostics.
+
+    Returns
+    -------
+    dict with keys:
+        "mask"            – boolean array [N], True for kept points
+        "riemann_tensor"  – filtered [N', ...]
+        "pts"             – filtered [N', ...]
+        "wo"              – filtered [N', 2]
+        "region_labels"   – filtered [N']
+        "j_elim"          – filtered [N', ...] or None
+        "g_cy"            – filtered [N', ...] or None
+        "owner_labels"    – filtered [N'] or None
+        "n_removed"       – int
+        "threshold"       – the curvature-norm threshold used
+    """
+    riem_np = riemann_tensor.numpy() if hasattr(riemann_tensor, 'numpy') else np.asarray(riemann_tensor)
+    curv_norm = np.max(np.abs(riem_np), axis=tuple(range(1, riem_np.ndim)))  # per-point max |R|
+
+    if method == "iqr":
+        log_curv = np.log10(np.maximum(curv_norm, 1e-30))
+        q1, q3 = np.percentile(log_curv, 25), np.percentile(log_curv, 75)
+        iqr = q3 - q1
+        log_thresh = q3 + iqr_factor * iqr
+        threshold = 10.0 ** log_thresh
+        mask = curv_norm <= threshold
+    elif method == "percentile":
+        threshold = np.percentile(curv_norm, percentile)
+        mask = curv_norm <= threshold
+    else:
+        raise ValueError(f"Unknown method {method!r}; use 'iqr' or 'percentile'")
+
+    n_removed = int(np.count_nonzero(~mask))
+
+    if verbose:
+        print(f"[filter_curvature_outliers] method={method}")
+        print(f"  per-point max|R|: median={np.median(curv_norm):.4e}, "
+              f"max={curv_norm.max():.4e}")
+        print(f"  threshold={threshold:.4e}")
+        print(f"  removing {n_removed}/{len(mask)} points "
+              f"({100.*n_removed/len(mask):.2f}%)")
+
+    def _filt(arr):
+        if arr is None:
+            return None
+        a = arr.numpy() if hasattr(arr, 'numpy') else np.asarray(arr)
+        return a[mask]
+
+    return {
+        "mask":           mask,
+        "riemann_tensor": tf.constant(_filt(riemann_tensor), dtype=tf.complex64),
+        "pts":            _filt(pts),
+        "wo":             _filt(wo),
+        "region_labels":  _filt(region_labels),
+        "j_elim":         _filt(j_elim),
+        "g_cy":           tf.constant(_filt(g_cy), dtype=tf.complex64) if g_cy is not None else None,
+        "owner_labels":   _filt(owner_labels),
+        "n_removed":      n_removed,
+        "threshold":      threshold,
+    }
+
+
 # ── corrected IPS integration ────────────────────────────────────────────
 
 def integrate_euler_top_form_regional(
-    integrand, pts, wo, comp_model, region_labels, kappas, normalize_to_vol=None
+    integrand, pts, wo, comp_model, region_labels, kappas,
+    normalize_to_vol=None, g_cy=None
 ):
     """
     Generalization of the old working top-form estimator.
@@ -1308,13 +1424,18 @@ def integrate_euler_top_form_regional(
         wo[:,0] = IPS weights
         wo[:,1] = |Omega|^2
     comp_model : model
-        Used for nfold and for sampled-volume normalization.
+        Used for nfold and (when g_cy is None) for sampled-volume normalization.
     region_labels : array [N]
         0-indexed region labels.
     kappas : array [n_regions]
         One kappa per region.
     normalize_to_vol : float or None
         If provided, rescale using the sampled Kähler volume as in the old code.
+    g_cy : tensor/array [N, nfold, nfold] or None
+        If provided, use det(g_cy) for the volume normalization instead of
+        evaluating comp_model.  For multi-region runs with deformed metrics
+        this must be the same per-point CY metric used to compute the
+        curvature, so that the numerator and denominator are consistent.
 
     Returns
     -------
@@ -1342,13 +1463,12 @@ def integrate_euler_top_form_regional(
     res = (-1.j / 2) ** comp_model.nfold * tf.reduce_mean(integrand * total_weights, axis=-1)
 
     if normalize_to_vol is not None:
-        pts_tf = tf.cast(pts, dtype=tf.float32)
-        vol = tf.abs(
-            tf.reduce_mean(
-                tf.linalg.det(comp_model(pts_tf)) * total_weights,
-                axis=-1
-            )
-        )
+        if g_cy is not None:
+            det_g = tf.linalg.det(tf.cast(g_cy, dtype=tf.complex64))
+        else:
+            pts_tf = tf.cast(pts, dtype=tf.float32)
+            det_g = tf.linalg.det(comp_model(pts_tf))
+        vol = tf.abs(tf.reduce_mean(det_g * total_weights, axis=-1))
         kappa_norm = normalize_to_vol / vol
         res *= tf.cast(kappa_norm, dtype=res.dtype)
 

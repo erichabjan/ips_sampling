@@ -1,10 +1,15 @@
 (* CICY IPS *)
 Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
+(* Launch parallel subkernels to match SLURM cpus-per-task allocation *)
+LaunchKernels[
+  With[{slurmCpus = Environment["SLURM_CPUS_PER_TASK"]},
+    If[StringQ[slurmCpus], ToExpression[slurmCpus], $ProcessorCount]
+  ]
+];
+
 (* bicubic *)
 dimPs = {2, 2};
-
-SeedRandom[1234];
 
 deg3Block = Select[Tuples[Range[0, 3], 3], Total[#] == 3 &];
 

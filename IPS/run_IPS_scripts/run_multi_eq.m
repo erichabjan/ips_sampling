@@ -1,6 +1,13 @@
 (* Import CICY IPS sampler *)
 Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
+(* Launch parallel subkernels to match SLURM cpus-per-task allocation *)
+LaunchKernels[
+  With[{slurmCpus = Environment["SLURM_CPUS_PER_TASK"]},
+    If[StringQ[slurmCpus], ToExpression[slurmCpus], $ProcessorCount]
+  ]
+];
+
 (* multi-equation CICY *)
 dimPs = {3, 3};
 degreeMatrix = {
@@ -24,7 +31,6 @@ EquationExponents[degRow_, dimPs_] := Module[
 ];
 exponents = EquationExponents[#, dimPs] & /@ degreeMatrix;
 
-SeedRandom[1234];
 coefficients = Table[
    N[RandomReal[{-1, 1}, Length[exponents[[i]]]], 20],
    {i, Length[exponents]}

@@ -1,6 +1,13 @@
 (* Import CICY IPS sampler *)
 Get["/home/habjan.e/CY_metric/ips_sampling/IPS/PointGeneratorMathematicaCICYIPS.m"]
 
+(* Launch parallel subkernels to match SLURM cpus-per-task allocation *)
+LaunchKernels[
+  With[{slurmCpus = Environment["SLURM_CPUS_PER_TASK"]},
+    If[StringQ[slurmCpus], ToExpression[slurmCpus], $ProcessorCount]
+  ]
+];
+
 (* Qunitic Inputs *)
 dimPs = {4};
 

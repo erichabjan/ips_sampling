@@ -332,7 +332,7 @@ attachMetricScoresToPointsCICY[pres_List, \[Kappa]s_List, pts_List] := Module[
     Module[
       {
         point, weight, omega, patchLocal, jElimGlobal, regionLabel,
-        geom, metricScores, bestMetric, minScore
+        geom, metricResults, rawMetricWeights, metricScores, bestMetric, minScore
       },
 
       point = pts[[i, 1]];
@@ -344,16 +344,19 @@ attachMetricScoresToPointsCICY[pres_List, \[Kappa]s_List, pts_List] := Module[
 
       geom = preparePointGeometryCICY[pres[[1]], point, patchLocal];
 
-      metricScores = Table[
+      (* For each metric j, compute the raw weight w_j(p) and the |κ_j w_j - 1| score *)
+      metricResults = Table[
         Module[{tmp},
           tmp = scorePointGeometryWithMetric[pres[[j]], geom];
           If[NumericQ[tmp[[1]]],
-            Abs[\[Kappa]s[[j]] tmp[[1]] - 1],
-            Infinity
+            {tmp[[1]], Abs[\[Kappa]s[[j]] tmp[[1]] - 1]},
+            {Indeterminate, Infinity}
           ]
         ],
         {j, Length[pres]}
       ];
+      rawMetricWeights = metricResults[[All, 1]];
+      metricScores    = metricResults[[All, 2]];
 
       minScore = Min[metricScores];
       bestMetric = First @ Ordering[metricScores, 1];
@@ -368,11 +371,13 @@ attachMetricScoresToPointsCICY[pres_List, \[Kappa]s_List, pts_List] := Module[
         geom,
         metricScores,
         bestMetric,
-        minScore
+        minScore,
+        rawMetricWeights
       }
     ],
     {i, Length[pts]},
-    DistributedContexts -> Automatic
+    DistributedContexts -> Automatic,
+    Method -> "CoarsestGrained"
   ];
 
   scoredPts
@@ -476,71 +481,159 @@ getWeightOmegas[
   getWeightOmegasPrepared[pre, pt, bpt, patchLocal]
 ];
 
-(* Find new Lambda matrices based on min/max weight points *)
-GetNewLambdas[
-  varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_, eqns_, beqns_,
-  pts_, Ls_, \[Kappa]s_, dimCY_, numParamsInPn_, kahlerModuli_: Automatic
+(* ─── Persistent weight cache primitives ────────────────────────────────
+   The cache stores raw w_j(p_i); κ-multiplication happens at read time.
+   weightCache  :: List of Lists, [n_points × n_metrics]
+   ptsFlat      :: List of 6-element point records, aligned with rows
+   regionLabels :: List of integers, source-region of each point
+*)
+
+addCacheRows[
+  weightCache_, ptsFlat_, regionLabels_, newPts_, sourceRegion_, Ls_,
+  varsFlat_, bvarsFlat_, dimPs_, eqns_, numParamsInPn_
 ] := Module[
-  {
-    preFS, preMetrics, allWeights, minData, maxData, minPoint, maxPoint,
-    wMin, wMax, \[Epsilon]Min, \[Epsilon]Max,
-    \[Lambda]Min, \[Lambda]Max, \[Lambda]MinInv, \[Lambda]MaxInv
-  },
+  {nNew, nMetrics, preMetrics, newRows, newLabels},
 
-  Print["GetNewLambdas: Starting with ", Length[pts], " points"];
-  Print["GetNewLambdas: Current number of metrics: ", Length[Ls]];
-  Print["GetNewLambdas: dimPs = ", dimPs];
-  Print["GetNewLambdas: dimCY = ", dimCY];
+  nNew = Length[newPts];
+  nMetrics = Length[Ls];
 
-  preFS = prepareWeightEvaluatorCICY[
-    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
-    Table[IdentityMatrix[dimPs[[i]] + 1], {i, Length[dimPs]}]
-  ];
+  If[nNew == 0, Return[{weightCache, ptsFlat, regionLabels}]];
 
   preMetrics = Table[
     prepareWeightEvaluatorCICY[
       varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
       metricBlocksFromL[Ls[[j]]]
     ],
-    {j, Length[Ls]}
+    {j, nMetrics}
   ];
 
-  allWeights = ParallelTable[
-    Module[{pt, patchLocal, allMetricWeights, chosenWeight, epsChosen},
-      pt = pts[[i, 1]];
-      patchLocal = pts[[i, 4]];
-
-      allMetricWeights = Table[
-        Module[{tmp},
-          tmp = getWeightOmegasPrepared[preMetrics[[j]], pt, Conjugate[pt], patchLocal];
-          If[NumericQ[tmp[[1]]], \[Kappa]s[[j]] tmp[[1]], Infinity]
+  newRows = ParallelTable[
+    Module[{point, patchLocal, row},
+      point = newPts[[i, 1]];
+      patchLocal = newPts[[i, 4]];
+      row = Table[
+        If[j == sourceRegion,
+          newPts[[i, 2]],
+          Module[{tmp},
+            tmp = getWeightOmegasPrepared[
+              preMetrics[[j]], point, Conjugate[point], patchLocal];
+            If[NumericQ[tmp[[1]]], tmp[[1]], Indeterminate]
+          ]
         ],
-        {j, Length[Ls]}
+        {j, nMetrics}
       ];
-
-      chosenWeight = allMetricWeights[[Ordering[Abs[allMetricWeights - 1], 1][[1]]]];
-      epsChosen = chosenWeight^(1/dimCY) - 1;
-
-      {chosenWeight, pt, epsChosen, i}
+      row
     ],
-    {i, Length[pts]},
-    DistributedContexts -> Automatic
+    {i, nNew},
+    DistributedContexts -> Automatic,
+    Method -> "CoarsestGrained"
   ];
 
-  Print["GetNewLambdas: Computed weights for all points"];
-  Print["GetNewLambdas: Number of valid weights: ", Count[allWeights, {_?NumericQ, __}]];
-  Print["GetNewLambdas: Sample of weights (first 3): ", Take[allWeights, Min[3, Length[allWeights]]]];
+  newLabels = ConstantArray[sourceRegion, nNew];
 
-  minData = SortBy[allWeights, #[[1]] &][[1]];
-  maxData = SortBy[allWeights, -#[[1]] &][[1]];
+  {
+    Join[weightCache, newRows],
+    Join[ptsFlat, newPts],
+    Join[regionLabels, newLabels]
+  }
+];
 
-  wMin = minData[[1]];
-  minPoint = minData[[2]];
-  \[Epsilon]Min = minData[[3]];
+addCacheColumn[
+  weightCache_, ptsFlat_, newL_,
+  varsFlat_, bvarsFlat_, dimPs_, eqns_, numParamsInPn_
+] := Module[
+  {nExisting, preMetric, newCol},
 
-  wMax = maxData[[1]];
-  maxPoint = maxData[[2]];
-  \[Epsilon]Max = maxData[[3]];
+  nExisting = Length[ptsFlat];
+
+  If[nExisting == 0, Return[weightCache]];
+
+  preMetric = prepareWeightEvaluatorCICY[
+    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn,
+    metricBlocksFromL[newL]
+  ];
+
+  newCol = ParallelTable[
+    Module[{point, patchLocal, tmp},
+      point = ptsFlat[[i, 1]];
+      patchLocal = ptsFlat[[i, 4]];
+      tmp = getWeightOmegasPrepared[preMetric, point, Conjugate[point], patchLocal];
+      If[NumericQ[tmp[[1]]], tmp[[1]], Indeterminate]
+    ],
+    {i, nExisting},
+    DistributedContexts -> Automatic,
+    Method -> "CoarsestGrained"
+  ];
+
+  MapThread[Append, {weightCache, newCol}]
+];
+
+dropCacheRows[weightCache_, ptsFlat_, regionLabels_, indicesToDrop_] := Module[
+  {keepMask},
+
+  If[indicesToDrop === {} || indicesToDrop === Null,
+    Return[{weightCache, ptsFlat, regionLabels}]
+  ];
+
+  keepMask = ConstantArray[True, Length[ptsFlat]];
+  Do[keepMask[[i]] = False, {i, indicesToDrop}];
+
+  {
+    Pick[weightCache, keepMask, True],
+    Pick[ptsFlat, keepMask, True],
+    Pick[regionLabels, keepMask, True]
+  }
+];
+
+(* Find new Lambda matrices based on min/max weight points *)
+GetNewLambdas[
+  dimPs_, weightCache_, ptsFlat_, Ls_, \[Kappa]s_, dimCY_
+] := Module[
+  {
+    nPoints, nMetrics, kappaWeights, chosenIdx, chosenWeight,
+    minIdx, maxIdx, minPoint, maxPoint,
+    wMin, wMax, \[Epsilon]Min, \[Epsilon]Max,
+    \[Lambda]Min, \[Lambda]Max, \[Lambda]MinInv, \[Lambda]MaxInv
+  },
+
+  nPoints = Length[ptsFlat];
+  nMetrics = Length[Ls];
+
+  Print["GetNewLambdas: Starting with ", nPoints, " points (cache read)"];
+  Print["GetNewLambdas: Current number of metrics: ", nMetrics];
+  Print["GetNewLambdas: dimPs = ", dimPs];
+  Print["GetNewLambdas: dimCY = ", dimCY];
+
+  (* Each point's per-metric chosen weight: pick j minimizing |κ_j w_j - 1|. *)
+  {chosenWeight, chosenIdx} = Transpose @ ParallelTable[
+    Module[{kw, idx},
+      kw = Table[
+        If[NumericQ[weightCache[[i, j]]],
+          \[Kappa]s[[j]] weightCache[[i, j]],
+          Infinity
+        ],
+        {j, nMetrics}
+      ];
+      idx = Ordering[Abs[kw - 1], 1][[1]];
+      {kw[[idx]], idx}
+    ],
+    {i, nPoints},
+    DistributedContexts -> Automatic,
+    Method -> "CoarsestGrained"
+  ];
+
+  Print["GetNewLambdas: Read chosen weights from cache for ", nPoints, " points"];
+
+  minIdx = First @ Ordering[chosenWeight, 1];
+  maxIdx = First @ Ordering[-chosenWeight, 1];
+
+  wMin = chosenWeight[[minIdx]];
+  minPoint = ptsFlat[[minIdx, 1]];
+  \[Epsilon]Min = wMin^(1/dimCY) - 1;
+
+  wMax = chosenWeight[[maxIdx]];
+  maxPoint = ptsFlat[[maxIdx, 1]];
+  \[Epsilon]Max = wMax^(1/dimCY) - 1;
 
   Print["GetNewLambdas: wMin = ", wMin, ", wMax = ", wMax];
   Print["GetNewLambdas: εMin = ", \[Epsilon]Min, ", εMax = ", \[Epsilon]Max];
@@ -638,7 +731,7 @@ getPointsOnCYIPS[varsUnflat_, numParamsInPn_, dimPs_, params_, pointsOnSphere_,
 
     paramVars = Flatten[Rest /@ params];
 
-    res = FindInstance[eqSystem, paramVars, Complexes, 1, WorkingPrecision -> precision];
+    res = NSolve[eqSystem, paramVars, WorkingPrecision -> precision];
     res = res /. HoldPattern[Null * r_Rule] :> r /. HoldPattern[r_Rule * Null] :> r;
     res = Which[
         res === {} || res === Null || res === $Failed, {},
@@ -671,7 +764,7 @@ SamplePointsIPS[
     eqns, beqns, numParamsInPn, params, pointsOnSphere, pts, i, j,
     w, \[CapitalOmega], allPts, \[Kappa], conf, start, col, totalDeg, numPoints,
     eqnTol, ptsGood, tries, maxTries, ptsBatch, residuals, mask, ptsKeep, nKeep,
-    hBlocksNative, preNative
+    hBlocksNative, preNative, rootsPerCall, nRaw
   },
 
   eqns = Table[
@@ -755,10 +848,19 @@ SamplePointsIPS[
   ptsGood = {};
   tries = 0;
   maxTries = 200;
+  rootsPerCall = $Failed;
+  (* Initial guess for batch 1; adaptively refined from batch 2 onward
+     once rootsPerCall is known *)
   numPoints = Ceiling[numPts/5];
 
   While[Length[ptsGood] < numPts && tries < maxTries,
     tries++;
+
+    (* Adaptive sizing: from batch 2 onward, use the observed roots/call
+       to size only what's still needed (with a 15% safety margin). *)
+    If[tries > 1 && NumericQ[rootsPerCall] && rootsPerCall > 0,
+      numPoints = Max[10, Ceiling[(numPts - Length[ptsGood]) / rootsPerCall * 1.15]];
+    ];
 
     pointsOnSphere = ParallelTable[
       SamplePointsOnSphere[dimPs[[i]] + 1, numPoints (numParamsInPn[[i]] + 1)],
@@ -776,12 +878,16 @@ SamplePointsIPS[
         eqns, L, precision
       ],
       {p, numPoints},
-      DistributedContexts -> Automatic
+      DistributedContexts -> Automatic,
+      Method -> "CoarsestGrained"
     ];
 
     ptsBatch = Flatten[ptsBatch, 1];
     ptsBatch = Select[ptsBatch, MatchQ[#, {_?NumericQ ..}] && Length[#] == Length[varsFlat] &];
-    Print["SamplePointsIPS: Batch ", tries, " produced ", Length[ptsBatch], " raw points."];
+    nRaw = Length[ptsBatch];
+    rootsPerCall = If[numPoints > 0, N[nRaw / numPoints], rootsPerCall];
+    Print["SamplePointsIPS: Batch ", tries, " produced ", nRaw,
+      " raw points (numPoints=", numPoints, ", rootsPerCall=", rootsPerCall, ")."];
 
     residuals = eqnResidual /@ ptsBatch;
     mask = Thread[residuals < eqnTol];
@@ -796,7 +902,9 @@ SamplePointsIPS[
   ];
 
   pts = ptsGood;
-  Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts, ")."];
+  If[Length[pts] > numPts, pts = RandomSample[pts, numPts]];
+  Print["SamplePointsIPS: Final valid points = ", Length[pts], " (requested ", numPts,
+    ", trimmed from ", Length[ptsGood], ")."];
 
   allPts = ParallelTable[
     Module[{point, patchLocal},
@@ -807,7 +915,8 @@ SamplePointsIPS[
       Chop[{point, w, \[CapitalOmega], patchLocal, jElimGlobal, regionLabel}]
     ],
     {i, Length[pts]},
-    DistributedContexts -> Automatic
+    DistributedContexts -> Automatic,
+    Method -> "CoarsestGrained"
   ];
 
   allPts = Select[
@@ -833,26 +942,38 @@ SamplePointsIPS[
 ];
 
 
-(* Rejection Sampling *)
+(* Rejection Sampling — cache-aware.
+   On entry, weightCache/ptsFlat/cacheRegionLabels describe ALL points
+   sampled so far (across all regions) and their κ-multiplied raw weights
+   against every metric in Ls. On exit, the rows for region LPos in those
+   structures have been replaced by the new region-LPos sample.
+*)
 SamplePointsWithRejectionCICY[
   varsFlat_, bvarsFlat_, varsUnflat_, bvarsUnflat_, dimPs_,
   coefficients_, exponents_, Ls_, pres_, LPos_, numPts_, dimCY_, numParamsInPn_,
-  \[Kappa]s_, kahlerModuli_: Automatic, precision_: 20,
-  startPts_: {}, numSampledInitial_: 0,
-  frontEnd_: False, verbose_: 0
+  \[Kappa]s_, weightCache_, ptsFlat_, cacheRegionLabels_,
+  kahlerModuli_: Automatic, precision_: 20,
+  numSampledInitial_: 0, frontEnd_: False, verbose_: 0
 ] := Module[
   {
     newPts, pts, ptsScored, resampleCounter, numSampled, numAccepted,
-    numToSample, tmpPts, tmpKappa, tmpNumParams, keepMask, keptPts,
+    numToSample, tmpPts, tmpKappa, tmpNumParams, keepMask, keptScored,
     ownershipTol, nNeeded, estAcceptance, safetyFactor,
-    minBatch, maxBatch, acceptedThisPass
+    minBatch, maxBatch, acceptedThisPass,
+    cache, pfCache, lblCache,
+    existingIdx, existingScores, ownershipMaskFirst,
+    keptIdx, droppedIdx, keptFreshPts, keptFreshRows
   },
 
   ownershipTol = 10^-6;
   resampleCounter = 0;
-  numSampled = 0;
+  numSampled = numSampledInitial;
   numAccepted = 0;
   newPts = {};
+
+  cache    = weightCache;
+  pfCache  = ptsFlat;
+  lblCache = cacheRegionLabels;
 
   safetyFactor = 1.25;
   minBatch = 250;
@@ -862,15 +983,60 @@ SamplePointsWithRejectionCICY[
 
     nNeeded = numPts - Length[newPts];
 
-    If[startPts =!= {} && resampleCounter == 0,
-      pts = startPts;
-      numSampled = numSampledInitial;,
-      
+    If[resampleCounter == 0,
+      (* FIRST PASS: read cached weights for existing region-LPos points;
+         keep the ones owned by LPos, drop the rest from the cache. *)
+      existingIdx = Flatten @ Position[lblCache, LPos];
+
+      If[Length[existingIdx] > 0,
+        existingScores = Table[
+          Module[{rawRow, kw},
+            rawRow = cache[[idx]];
+            kw = Table[
+              If[NumericQ[rawRow[[j]]], \[Kappa]s[[j]] rawRow[[j]], Infinity],
+              {j, Length[Ls]}
+            ];
+            Abs[kw - 1]
+          ],
+          {idx, existingIdx}
+        ];
+
+        ownershipMaskFirst = Table[
+          (First @ Ordering[existingScores[[k]], 1]) == LPos,
+          {k, Length[existingIdx]}
+        ];
+
+        keptIdx    = Pick[existingIdx, ownershipMaskFirst, True];
+        droppedIdx = Pick[existingIdx, ownershipMaskFirst, False];
+
+        keptFreshPts = pfCache[[keptIdx]];
+
+        (* Drop not-owned rows from cache before continuing *)
+        {cache, pfCache, lblCache} =
+          dropCacheRows[cache, pfCache, lblCache, droppedIdx];
+
+        acceptedThisPass = Length[keptFreshPts];
+        newPts = Join[newPts, keptFreshPts];
+        numAccepted += acceptedThisPass;
+
+        PrintMsg[
+          "Region " <> ToString[LPos] <> ": kept " <> ToString[Length[newPts]] <>
+          "/" <> ToString[numPts] <> " points after pass 1 (from cache; " <>
+          "accepted = " <> ToString[acceptedThisPass] <>
+          ", dropped = " <> ToString[Length[droppedIdx]] <> ").",
+          frontEnd, verbose
+        ];
+      ];
+
+      ,
+      (* SUBSEQUENT PASS: sample fresh from L_LPos, score against all metrics,
+         keep only the L_LPos-owned ones and add them (with their full
+         raw-weight rows) to the cache. Rejected fresh points never enter
+         the cache. *)
       estAcceptance = If[numSampled > 0 && numAccepted > 0,
         N[numAccepted/numSampled],
         1./Max[1, Length[Ls]]
       ];
-
       estAcceptance = Max[10^-3, estAcceptance];
 
       numToSample = Ceiling[safetyFactor * nNeeded / estAcceptance];
@@ -885,25 +1051,31 @@ SamplePointsWithRejectionCICY[
 
       pts = tmpPts;
       numSampled += Length[pts];
-    ];
 
-    ptsScored = attachMetricScoresToPointsCICY[pres, \[Kappa]s, pts];
+      ptsScored = attachMetricScoresToPointsCICY[pres, \[Kappa]s, pts];
+      keepMask = selectPointsOwnedByMetricCICY[ptsScored, LPos, ownershipTol];
+      keptScored = Pick[ptsScored, keepMask, True];
+      acceptedThisPass = Length[keptScored];
+      numAccepted += acceptedThisPass;
 
-    keepMask = selectPointsOwnedByMetricCICY[ptsScored, LPos, ownershipTol];
-    keptPts = Pick[ptsScored, keepMask, True];
-    acceptedThisPass = Length[keptPts];
+      keptFreshPts  = dropCachedMetricDataCICY[keptScored];
+      keptFreshRows = keptScored[[All, 11]];  (* raw w_j(p) per metric *)
 
-    numAccepted += acceptedThisPass;
+      cache    = Join[cache, keptFreshRows];
+      pfCache  = Join[pfCache, keptFreshPts];
+      lblCache = Join[lblCache, ConstantArray[LPos, acceptedThisPass]];
 
-    newPts = Join[newPts, dropCachedMetricDataCICY[keptPts]];
+      newPts = Join[newPts, keptFreshPts];
 
-    PrintMsg[
-      "Region " <> ToString[LPos] <> ": kept " <> ToString[Length[newPts]] <>
-      "/" <> ToString[numPts] <> " points after rejection pass " <>
-      ToString[resampleCounter + 1] <>
-      " (accepted this pass = " <> ToString[acceptedThisPass] <>
-      ", estimated acceptance ≈ " <> ToString[N[If[numSampled > 0, numAccepted/numSampled, 0], 4]] <> ").",
-      frontEnd, verbose
+      PrintMsg[
+        "Region " <> ToString[LPos] <> ": kept " <> ToString[Length[newPts]] <>
+        "/" <> ToString[numPts] <> " points after rejection pass " <>
+        ToString[resampleCounter + 1] <>
+        " (accepted this pass = " <> ToString[acceptedThisPass] <>
+        ", estimated acceptance ≈ " <>
+        ToString[N[If[numSampled > 0, numAccepted/numSampled, 0], 4]] <> ").",
+        frontEnd, verbose
+      ];
     ];
 
     resampleCounter++;
@@ -915,7 +1087,7 @@ SamplePointsWithRejectionCICY[
     frontEnd, verbose
   ];
 
-  Return[{newPts, numAccepted, numSampled}];
+  Return[{newPts, cache, pfCache, lblCache, numAccepted, numSampled}];
 ];
 
 (* Main function for IPS on CICYs *)
@@ -928,7 +1100,8 @@ GeneratePointsMCICYIPS[
     Ls, allPts, regionPts, newPts, pres,
     \[Kappa], \[Kappa]s, numParamsInPn, dimCY,
     r, i, Acceptance, NumSample, Acceptances, NumSamples,
-    regionLabels, newLambdaPair, nextRegionIndex
+    regionLabels, newLambdaPair, nextRegionIndex,
+    weightCache, ptsFlat, cacheRegionLabels
   },
 
   If[!frontEnd, ClientLibrary`SetInfoLogLevel[]];
@@ -981,6 +1154,11 @@ GeneratePointsMCICYIPS[
   Acceptances = {};
   NumSamples = {};
 
+  (* Persistent weight cache state — see addCacheRows / addCacheColumn / dropCacheRows. *)
+  weightCache = {};
+  ptsFlat = {};
+  cacheRegionLabels = {};
+
   PrintMsg["Processing region 1", frontEnd, verbose];
   {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
     varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
@@ -993,18 +1171,27 @@ GeneratePointsMCICYIPS[
   NumSamples = {Length[newPts]};
   PrintMsg["Calculated \[Kappa] = " <> ToString[\[Kappa]], frontEnd, verbose];
 
+  (* Seed cache with region 1 rows (one column at this point, source weight reused). *)
+  {weightCache, ptsFlat, cacheRegionLabels} = addCacheRows[
+    weightCache, ptsFlat, cacheRegionLabels, newPts, 1, Ls,
+    varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn
+  ];
+
   nextRegionIndex = 2;
 
   While[nextRegionIndex <= NumRegions,
 
     newLambdaPair = GetNewLambdas[
-      varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-      dimPs, eqns, beqns, Flatten[regionPts, 1],
-      Ls, \[Kappa]s, dimCY, numParamsInPn, kahlerModuli
+      dimPs, weightCache, ptsFlat, Ls, \[Kappa]s, dimCY
     ];
 
     (* First new metric in the pair *)
     Ls = Append[Ls, newLambdaPair[[1]]];
+    (* Extend cache with column for new L_min across existing points *)
+    weightCache = addCacheColumn[
+      weightCache, ptsFlat, Ls[[-1]],
+      varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn
+    ];
 
     PrintMsg["Processing region " <> ToString[nextRegionIndex], frontEnd, verbose];
     {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
@@ -1017,11 +1204,21 @@ GeneratePointsMCICYIPS[
     AppendTo[Acceptances, Length[newPts]];
     AppendTo[NumSamples, Length[newPts]];
 
+    (* Add new region's rows to cache *)
+    {weightCache, ptsFlat, cacheRegionLabels} = addCacheRows[
+      weightCache, ptsFlat, cacheRegionLabels, newPts, nextRegionIndex, Ls,
+      varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn
+    ];
+
     nextRegionIndex++;
 
     (* Second new metric in the pair, only if needed *)
     If[nextRegionIndex <= NumRegions,
       Ls = Append[Ls, newLambdaPair[[2]]];
+      weightCache = addCacheColumn[
+        weightCache, ptsFlat, Ls[[-1]],
+        varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn
+      ];
 
       PrintMsg["Processing region " <> ToString[nextRegionIndex], frontEnd, verbose];
       {newPts, \[Kappa], numParamsInPn} = SamplePointsIPS[
@@ -1033,6 +1230,11 @@ GeneratePointsMCICYIPS[
       AppendTo[\[Kappa]s, \[Kappa]];
       AppendTo[Acceptances, Length[newPts]];
       AppendTo[NumSamples, Length[newPts]];
+
+      {weightCache, ptsFlat, cacheRegionLabels} = addCacheRows[
+        weightCache, ptsFlat, cacheRegionLabels, newPts, nextRegionIndex, Ls,
+        varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn
+      ];
 
       nextRegionIndex++;
     ];
@@ -1060,14 +1262,16 @@ GeneratePointsMCICYIPS[
     For[r = 1, r <= Length[Ls], r++,
       PrintMsg["Reprocessing region " <> ToString[r], frontEnd, verbose];
 
-      {newPts, Acceptance, NumSample} = SamplePointsWithRejectionCICY[
-        varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
-        dimPs, coefficients, exponents,
-        Ls, pres, r, NumPts, dimCY, numParamsInPn, \[Kappa]s,
-        kahlerModuli, precision,
-        regionPts[[r]], NumSamples[[r]],
-        frontEnd, verbose
-      ];
+      {newPts, weightCache, ptsFlat, cacheRegionLabels, Acceptance, NumSample} =
+        SamplePointsWithRejectionCICY[
+          varsFlat, bvarsFlat, varsUnflat, bvarsUnflat,
+          dimPs, coefficients, exponents,
+          Ls, pres, r, NumPts, dimCY, numParamsInPn, \[Kappa]s,
+          weightCache, ptsFlat, cacheRegionLabels,
+          kahlerModuli, precision,
+          NumSamples[[r]],
+          frontEnd, verbose
+        ];
 
       regionPts[[r]] = newPts;
       Acceptances[[r]] = Acceptance;

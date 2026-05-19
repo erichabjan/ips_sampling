@@ -1,19 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=quintic_sampling
+#SBATCH --job-name=quintic_throat_sampling
 #SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_quintic_throat_%A_%a.log
-#SBATCH --array=0
-#SBATCH --cpus-per-task=1
+#SBATCH --array=0-3
+#SBATCH --cpus-per-task=8
 #SBATCH --time=24:00:00
 #SBATCH --mem=15G
 #SBATCH --partition=short
 
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export TF_NUM_INTRAOP_THREADS=${SLURM_CPUS_PER_TASK}
+export TF_NUM_INTEROP_THREADS=2
 export CUDA_VISIBLE_DEVICES=""
 
-REGION_LIST=(5)
+REGION_LIST=(1 3 5 11)
 
 NUM_REGIONS=${REGION_LIST[$SLURM_ARRAY_TASK_ID]}
-POINT_NUM=100000
+POINT_NUM=20000
 OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/quintic_throat/quintic_throat_reg${NUM_REGIONS}/"
 
 echo "SLURM_ARRAY_TASK_ID = ${SLURM_ARRAY_TASK_ID}"
