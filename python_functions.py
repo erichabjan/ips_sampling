@@ -1187,7 +1187,7 @@ def riemann_opt(g_model, pts, j_elim=None):
         )  # float32
 
     d_gamma_stacked = tape.batch_jacobian(
-        gamma_stacked, pts, experimental_use_pfor=True
+        gamma_stacked, pts, experimental_use_pfor=False
     )
     del tape
 
@@ -1263,7 +1263,7 @@ def compute_riemann_regional(
     if return_metric:
         g_out = np.zeros((N, nf, nf), dtype=np.complex64)
 
-    for r in tqdm(unique_regions, desc="Riemann per region"):
+    def _process_region(r):
         mask = (region_labels == r)
         idx = np.where(mask)[0]
         pts_r = tf.gather(pts, idx)
@@ -1272,7 +1272,7 @@ def compute_riemann_regional(
             jel_r = tf.convert_to_tensor(
                 np.asarray(j_elim)[idx], dtype=tf.int64)
 
-        h_blocks = h_blocks_per_region.get(r, None)
+        h_blocks = h_blocks_per_region.get(int(r), None)
         model_r = DeformedFSModelComp(
             None, BASIS=BASIS, alpha=alpha,
             deg=deg, monomials=monomials,
@@ -1290,9 +1290,36 @@ def compute_riemann_regional(
             if return_metric:
                 g_chunks.append(model_r(pts_r[s:e], j_elim=jb).numpy())
 
-        riem_out[idx] = np.concatenate(riem_chunks, axis=0)
-        if return_metric:
-            g_out[idx] = np.concatenate(g_chunks, axis=0)
+        riem_concat = np.concatenate(riem_chunks, axis=0)
+        g_concat = np.concatenate(g_chunks, axis=0) if return_metric else None
+        return idx, riem_concat, g_concat
+
+    # Cap concurrent regions: each region's pfor uses TF's intra-op pool, so
+    # running too many in parallel oversubscribes the CPUs. n_cpus // 2 leaves
+    # ~2 cores per worker on an 8-core box, which empirically gives the best
+    # throughput without thrashing.
+    n_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
+    max_workers = max(1, min(len(unique_regions), n_cpus // 2))
+
+    if max_workers > 1 and len(unique_regions) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_process_region, int(r)) for r in unique_regions]
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Riemann per region (parallel, {max_workers} workers)",
+            ):
+                idx, riem_concat, g_concat = future.result()
+                riem_out[idx] = riem_concat
+                if return_metric:
+                    g_out[idx] = g_concat
+    else:
+        for r in tqdm(unique_regions, desc="Riemann per region"):
+            idx, riem_concat, g_concat = _process_region(int(r))
+            riem_out[idx] = riem_concat
+            if return_metric:
+                g_out[idx] = g_concat
 
     # ── save to cache ───────────────────────────────────────────────────
     if save_dir is not None:

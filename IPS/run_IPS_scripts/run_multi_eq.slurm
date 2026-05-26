@@ -3,8 +3,8 @@
 #SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_multi_eq_%A_%a.log
 #SBATCH --array=0-3
 #SBATCH --cpus-per-task=8
-#SBATCH --time=08:00:00
-#SBATCH --mem=15G
+#SBATCH --time=10:00:00
+#SBATCH --mem=20G
 #SBATCH --partition=short
 
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
