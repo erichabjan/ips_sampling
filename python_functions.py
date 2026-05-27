@@ -540,20 +540,17 @@ def estimate_region_volume_fractions(
 
 def cy_volume_from_intersections(
     input_dir: Union[str, Path],
-    num_regions: int = 1,
     kahler_moduli: Optional[np.ndarray] = None,
-    metadata_filename: Optional[str] = None,
+    metadata_filename: str = "metadata.json",
 ) -> float:
     """
     Compute the Kähler volume Vol_K = d_{ijk} t_i t_j t_k for a CICY 3-fold,
     using intersection numbers computed by cymetric from the geometry saved
-    in metadata_{num_regions}.json.
+    in ``metadata.json``.
 
     Returns the intersection-number volume in cymetric's convention.
     """
     input_dir = Path(input_dir)
-    if metadata_filename is None:
-        metadata_filename = f"metadata_{num_regions}.json"
     meta_path = input_dir / metadata_filename
 
     with open(meta_path, "r") as f:

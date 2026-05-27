@@ -604,7 +604,7 @@ GetNewLambdas[
   Print["GetNewLambdas: dimPs = ", dimPs];
   Print["GetNewLambdas: dimCY = ", dimCY];
 
-  (* Each point's per-metric chosen weight: pick j minimizing |κ_j w_j - 1|. *)
+  (* Each points per-metric chosen weight: pick j minimizing |κ_j w_j - 1|. *)
   {chosenWeight, chosenIdx} = Transpose @ ParallelTable[
     Module[{kw, idx},
       kw = Table[
@@ -857,7 +857,7 @@ SamplePointsIPS[
     tries++;
 
     (* Adaptive sizing: from batch 2 onward, use the observed roots/call
-       to size only what's still needed (with a 15% safety margin). *)
+       to size only whats still needed (with a 15% safety margin). *)
     If[tries > 1 && NumericQ[rootsPerCall] && rootsPerCall > 0,
       numPoints = Max[10, Ceiling[(numPts - Length[ptsGood]) / rootsPerCall * 1.15]];
     ];
@@ -1204,7 +1204,7 @@ GeneratePointsMCICYIPS[
     AppendTo[Acceptances, Length[newPts]];
     AppendTo[NumSamples, Length[newPts]];
 
-    (* Add new region's rows to cache *)
+    (* Add new regions rows to cache *)
     {weightCache, ptsFlat, cacheRegionLabels} = addCacheRows[
       weightCache, ptsFlat, cacheRegionLabels, newPts, nextRegionIndex, Ls,
       varsFlat, bvarsFlat, dimPs, eqns, numParamsInPn

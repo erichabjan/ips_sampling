@@ -3,7 +3,7 @@
 #SBATCH --output=/home/habjan.e/CY_metric/sandbox_notebooks/output_files/ips_sampling/ips_sampling_quintic_%A_%a.log
 #SBATCH --array=0-3
 #SBATCH --cpus-per-task=8
-#SBATCH --time=01:00:00
+#SBATCH --time=00:10:00
 #SBATCH --mem=20G
 #SBATCH --partition=short
 
@@ -15,7 +15,7 @@ export CUDA_VISIBLE_DEVICES=""
 REGION_LIST=(1 3 5 11)
 
 NUM_REGIONS=${REGION_LIST[$SLURM_ARRAY_TASK_ID]}
-POINT_NUM=2000
+POINT_NUM=200
 OUTPUT_DIR="/home/habjan.e/CY_metric/data/ips_mathematica_output/quintic/quintic_reg${NUM_REGIONS}/"
 
 echo "SLURM_ARRAY_TASK_ID = ${SLURM_ARRAY_TASK_ID}"
@@ -23,18 +23,13 @@ echo "NUM_REGIONS = ${NUM_REGIONS}"
 echo "OUTPUT_DIR = ${OUTPUT_DIR}"
 
 module load mathematica/14.1.0
-WolframKernel -script /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_quintic.m -- \
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate IPSenv
+
+python3 /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_quintic.py \
   --output-dir "${OUTPUT_DIR}" \
   --num-regions "${NUM_REGIONS}" \
   --total-points "${POINT_NUM}"
 
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate IPSenv
-
-python3 /home/habjan.e/CY_metric/ips_sampling/IPS/cymetric_compatibility.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
-
 python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
+  --input-dir "${OUTPUT_DIR}"

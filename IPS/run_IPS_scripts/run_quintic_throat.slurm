@@ -23,18 +23,13 @@ echo "NUM_REGIONS = ${NUM_REGIONS}"
 echo "OUTPUT_DIR = ${OUTPUT_DIR}"
 
 module load mathematica/14.1.0
-WolframKernel -script /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_quintic_throat.m -- \
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate IPSenv
+
+python3 /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_quintic_throat.py \
   --output-dir "${OUTPUT_DIR}" \
   --num-regions "${NUM_REGIONS}" \
   --total-points "${POINT_NUM}"
 
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate IPSenv
-
-python3 /home/habjan.e/CY_metric/ips_sampling/IPS/cymetric_compatibility.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
-
 python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
+  --input-dir "${OUTPUT_DIR}"

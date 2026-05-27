@@ -23,25 +23,20 @@ echo "NUM_REGIONS = ${NUM_REGIONS}"
 echo "OUTPUT_DIR = ${OUTPUT_DIR}"
 
 module load mathematica/14.1.0
-WolframKernel -script /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_bicubic.m \
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate IPSenv
+
+python3 /home/habjan.e/CY_metric/ips_sampling/IPS/run_IPS_scripts/run_bicubic.py \
   --output-dir "${OUTPUT_DIR}" \
   --num-regions "${NUM_REGIONS}" \
   --total-points "${POINT_NUM}"
 
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate IPSenv
-
-python3 /home/habjan.e/CY_metric/ips_sampling/IPS/cymetric_compatibility.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
-
 python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number.py \
-  --input-dir "${OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
+  --input-dir "${OUTPUT_DIR}"
 
 ### Run the exact same code but for the points sampled by cymetric
 CYMETRIC_OUTPUT_DIR="/home/habjan.e/CY_metric/data/cymetric_output/bicubic/bicubic_reg${NUM_REGIONS}_run${SLURM_ARRAY_TASK_ID}/"
-IPS_METADATA="${OUTPUT_DIR}/metadata_${NUM_REGIONS}.json"
+IPS_METADATA="${OUTPUT_DIR}/metadata.json"
 
 echo "CYMETRIC_OUTPUT_DIR = ${CYMETRIC_OUTPUT_DIR}"
 
@@ -51,10 +46,5 @@ python3 /home/habjan.e/CY_metric/ips_sampling/cymetric/bicubic/bicubic_sampling.
   --num-points "${POINT_NUM}" \
   --num-regions "${NUM_REGIONS}"
 
-python3 /home/habjan.e/CY_metric/ips_sampling/IPS/cymetric_compatibility.py \
-  --input-dir "${CYMETRIC_OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
-
 python3 /home/habjan.e/CY_metric/ips_sampling/IPS/Euler_number.py \
-  --input-dir "${CYMETRIC_OUTPUT_DIR}" \
-  --num-regions "${NUM_REGIONS}"
+  --input-dir "${CYMETRIC_OUTPUT_DIR}"
